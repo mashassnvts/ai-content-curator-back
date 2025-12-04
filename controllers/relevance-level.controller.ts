@@ -83,7 +83,7 @@ export const setUserInterestLevel = async (req: AuthenticatedRequest, res: Respo
             return res.status(400).json({ error: true, message: 'Interest and level are required' });
         }
 
-        const validLevels = ['beginner', 'intermediate', 'advanced', 'expert'];
+        const validLevels = ['novice', 'amateur', 'professional'];
         if (!validLevels.includes(level)) {
             return res.status(400).json({ error: true, message: `Level must be one of: ${validLevels.join(', ')}` });
         }

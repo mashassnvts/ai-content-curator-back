@@ -8,6 +8,7 @@ import { Request } from 'express';
 import UserService from '../services/user.service'; 
 import { analyzeRelevanceLevel } from '../services/relevance-level.service';
 import UserInterestLevel from '../models/UserInterestLevel';
+import ContentRelevanceScore from '../models/ContentRelevanceScore';
 import ytpl from 'ytpl';
 
 const MAX_URLS_LIMIT = 25;
@@ -41,12 +42,53 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
                 console.log(`📊 [Relevance Level] Found ${userLevels.length} user level(s):`, userLevels);
 
                 if (userLevels.length > 0) {
-                    console.log(`📊 [Relevance Level] Analyzing content level and user match...`);
-                    relevanceLevelResult = await analyzeRelevanceLevel(content, userLevels, interests);
-                    console.log(`✅ [Relevance Level] Analysis completed successfully:`);
-                    console.log(`   - Content Level: ${relevanceLevelResult.contentLevel}`);
-                    console.log(`   - User Level Match: ${relevanceLevelResult.userLevelMatch}`);
-                    console.log(`   - Relevance Score: ${relevanceLevelResult.relevanceScore}/100`);
+                    console.log(`📊 [Relevance Level] Analyzing content level and user match for each interest...`);
+                    
+                    // Анализируем профессиональность контента для каждого интереса отдельно
+                    const interestsList = interests.split(',').map((i: string) => i.trim().toLowerCase());
+                    const relevanceResults: Array<{interest: string, result: any}> = [];
+                    
+                    for (const interest of interestsList) {
+                        const userLevel = userLevels.find(ul => ul.interest.toLowerCase() === interest);
+                        if (userLevel) {
+                            try {
+                                const { analyzeRelevanceLevelForInterest } = await import('../services/relevance-level.service');
+                                const result = await analyzeRelevanceLevelForInterest(content, interest, userLevel.level);
+                                relevanceResults.push({ interest, result });
+                                
+                                // Сохраняем оценку релевантности для каждого интереса
+                                await ContentRelevanceScore.upsert({
+                                    userId,
+                                    interest: interest.toLowerCase(),
+                                    url,
+                                    contentLevel: result.contentLevel,
+                                    relevanceScore: result.relevanceScore,
+                                    explanation: result.explanation,
+                                });
+                                console.log(`💾 Saved relevance score for interest "${interest}": ${result.relevanceScore}/100 (content level: ${result.contentLevel})`);
+                            } catch (error: any) {
+                                console.warn(`⚠️ Failed to analyze/save relevance score for interest "${interest}": ${error.message}`);
+                            }
+                        }
+                    }
+                    
+                    // Используем первый результат для отображения (или усредняем)
+                    if (relevanceResults.length > 0) {
+                        relevanceLevelResult = relevanceResults[0].result;
+                        if (relevanceResults.length > 1) {
+                            // Если несколько интересов, усредняем оценку
+                            const avgScore = Math.round(relevanceResults.reduce((sum, r) => sum + r.result.relevanceScore, 0) / relevanceResults.length);
+                            relevanceLevelResult = {
+                                ...relevanceLevelResult,
+                                relevanceScore: avgScore,
+                                explanation: `Анализ для интересов: ${relevanceResults.map(r => r.interest).join(', ')}. ${relevanceLevelResult.explanation}`,
+                            };
+                        }
+                        console.log(`✅ [Relevance Level] Analysis completed successfully:`);
+                        console.log(`   - Content Level: ${relevanceLevelResult.contentLevel}`);
+                        console.log(`   - User Level Match: ${relevanceLevelResult.userLevelMatch}`);
+                        console.log(`   - Relevance Score: ${relevanceLevelResult.relevanceScore}/100`);
+                    }
                 } else {
                     console.log(`⏭️ [Relevance Level] Skipping analysis: no user levels set for interests. User can set levels in profile.`);
                 }
@@ -121,7 +163,7 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
                     }
                     
                     if (playlist && playlist.items && playlist.items.length > 0) {
-                        console.log(`✅ Извлечено ${playlist.items.length} видео из плейлиста.`);
+                    console.log(`✅ Извлечено ${playlist.items.length} видео из плейлиста.`);
                         console.log(`   Каждое видео будет обработано отдельно...`);
                         playlist.items.forEach((item: any, index: number) => {
                             let videoUrl: string | null = null;
@@ -158,7 +200,7 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
                         console.log(`   Обрабатываем как обычное видео: ${videoMatch[1]}`);
                         allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
                     } else {
-                        allUrls.add(url);
+                    allUrls.add(url);
                     }
                 }
             } else {

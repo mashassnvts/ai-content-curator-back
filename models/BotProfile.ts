@@ -13,7 +13,7 @@ interface BotProfileAttributes {
     user_id?: number | null;
     guest_interests?: string | null;
     guest_active_interests?: string | null;
-    guest_levels?: string | null; // JSON объект: {"танцы": "beginner", "программирование": "intermediate"}
+    guest_levels?: string | null; // JSON объект: {"танцы": "novice", "программирование": "amateur"}
 }
 
 interface BotProfileCreationAttributes extends Optional<BotProfileAttributes, 'id' | 'mode'> {}

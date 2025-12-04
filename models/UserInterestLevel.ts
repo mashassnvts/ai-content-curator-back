@@ -6,7 +6,7 @@ interface UserInterestLevelAttributes {
     id: number;
     userId: number;
     interest: string;
-    level: 'beginner' | 'intermediate' | 'advanced' | 'expert';
+    level: 'novice' | 'amateur' | 'professional'; // новичок, любитель, профессионал
 }
 
 interface UserInterestLevelCreationAttributes extends Optional<UserInterestLevelAttributes, 'id'> {}
@@ -15,7 +15,7 @@ class UserInterestLevel extends Model<UserInterestLevelAttributes, UserInterestL
     public id!: number;
     public userId!: number;
     public interest!: string;
-    public level!: 'beginner' | 'intermediate' | 'advanced' | 'expert';
+    public level!: 'novice' | 'amateur' | 'professional';
 
     public readonly createdAt!: Date;
     public readonly updatedAt!: Date;
@@ -41,9 +41,9 @@ UserInterestLevel.init(
             allowNull: false,
         },
         level: {
-            type: DataTypes.ENUM('beginner', 'intermediate', 'advanced', 'expert'),
+            type: DataTypes.ENUM('novice', 'amateur', 'professional'),
             allowNull: false,
-            defaultValue: 'beginner',
+            defaultValue: 'novice',
         },
     },
     {

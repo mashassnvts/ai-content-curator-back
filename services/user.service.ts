@@ -49,12 +49,12 @@ class UserService {
         await UserInterestLevel.destroy({ where: { userId } }); // Удаляем старые уровни
         
         const now = new Date();
-        const validLevels = ['beginner', 'intermediate', 'advanced', 'expert'];
+        const validLevels = ['novice', 'amateur', 'professional'];
         
         const interestPromises = interests.map(async (item) => {
             // Поддержка двух форматов: строки или объекты
             const interestText = typeof item === 'string' ? item : item.interest;
-            const level = typeof item === 'object' && item.level ? item.level : 'beginner'; // По умолчанию beginner
+            const level = typeof item === 'object' && item.level ? item.level : 'novice'; // По умолчанию novice
             
             // Создаем интерес
             const interest = await UserInterest.create({ userId, interest: interestText, lastUsedAt: now });
@@ -69,11 +69,11 @@ class UserService {
                     defaults: {
                         userId,
                         interest: interestText.toLowerCase().trim(),
-                        level: level as 'beginner' | 'intermediate' | 'advanced' | 'expert',
+                        level: level as 'novice' | 'amateur' | 'professional',
                     },
                 }).then(([userLevel, created]) => {
                     if (!created) {
-                        userLevel.level = level as 'beginner' | 'intermediate' | 'advanced' | 'expert';
+                        userLevel.level = level as 'novice' | 'amateur' | 'professional';
                         userLevel.save();
                     }
                 });
@@ -91,7 +91,7 @@ class UserService {
      */
     async addInterest(userId: number, interest: string, level?: string): Promise<{interest: UserInterest, level?: UserInterestLevel}> {
         const now = new Date();
-        const validLevels = ['beginner', 'intermediate', 'advanced', 'expert'];
+        const validLevels = ['novice', 'amateur', 'professional'];
         
         // Проверяем, существует ли уже такой интерес
         const existingInterest = await UserInterest.findOne({
@@ -127,12 +127,12 @@ class UserService {
                 defaults: {
                     userId,
                     interest: interest.trim().toLowerCase(),
-                    level: level as 'beginner' | 'intermediate' | 'advanced' | 'expert',
+                    level: level as 'novice' | 'amateur' | 'professional',
                 },
             });
             
             if (userLevel.level !== level) {
-                userLevel.level = level as 'beginner' | 'intermediate' | 'advanced' | 'expert';
+                userLevel.level = level as 'novice' | 'amateur' | 'professional';
                 await userLevel.save();
             }
             

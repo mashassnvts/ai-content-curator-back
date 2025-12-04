@@ -97,7 +97,7 @@ class UserController {
     /**
      * Добавляет один интерес с опциональным уровнем
      * POST /api/auth/interests/add
-     * Body: { interest: "танцы", level?: "beginner" }
+     * Body: { interest: "танцы", level?: "novice" }
      */
     async addInterest(req: AuthenticatedRequest, res: Response): Promise<void> {
         try {
@@ -112,7 +112,7 @@ class UserController {
                 return;
             }
             
-            const validLevels = ['beginner', 'intermediate', 'advanced', 'expert'];
+            const validLevels = ['novice', 'amateur', 'professional'];
             if (level && !validLevels.includes(level)) {
                 res.status(400).json({ message: `Level must be one of: ${validLevels.join(', ')}` });
                 return;
