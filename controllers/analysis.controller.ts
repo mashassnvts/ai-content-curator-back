@@ -17,6 +17,29 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
     try {
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
 
+        // Проверяем, не является ли контент сообщением об ошибке
+        const errorIndicators = [
+            'Failed to scrape',
+            'Failed to extract',
+            'Could not find',
+            'Chrome not found',
+            'Cannot find module',
+            'Error:',
+            'error:',
+            'Exception:',
+            'exception:',
+            'Не удалось извлечь',
+            'не удалось извлечь'
+        ];
+        
+        const isErrorMessage = errorIndicators.some(indicator => 
+            content.toLowerCase().includes(indicator.toLowerCase())
+        );
+        
+        if (isErrorMessage || content.trim().length < 50) {
+            throw new Error(`Не удалось извлечь контент из URL. ${content.substring(0, 200)}`);
+        }
+
         const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url);
         
         // Автоматически анализируем уровень релевантности для авторизированных пользователей
