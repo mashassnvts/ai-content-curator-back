@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES6",
+    "module": "commonjs",
+    "lib": ["ES2020", "DOM"],
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "typeRoots": [
+      "./node_modules/@types",
+      "./types"
+    ]
+  },
+  "include": [
+    "server.ts",
+    "bot-runner.ts",
+    "services/**/*.ts",
+    "controllers/**/*.ts",
+    "routes/**/*.ts",
+    "models/**/*.ts",
+    "config/**/*.ts",
+    "middleware/**/*.ts",
+    "types/**/*.ts",
+    "bot/**/*.ts"
+  ],
+  "exclude": ["node_modules"]
+}
