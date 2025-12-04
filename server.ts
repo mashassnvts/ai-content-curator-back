@@ -31,9 +31,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// Явно обрабатываем preflight запросы
-app.options('*', cors(corsOptions));
 app.use(express.json()); // Ensure JSON bodies are parsed
 
 // Remove urlencoded parser if it exists, to avoid conflicts
