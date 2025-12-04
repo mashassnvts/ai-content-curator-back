@@ -50,21 +50,32 @@ app.use((err: any, req: Request, res: Response, next: any) => {
 });
 
 const startServer = async () => {
-    try {
-        // Back to alter: true for safety after the DB reset.
-        await sequelize.sync({ alter: true }); 
-    } catch (error) {
-        // This console.error is important for debugging database connection issues.
-        console.error('Unable to connect to the database:', error);
-    }
+    // Пытаемся подключиться к БД с таймаутом
+    const dbConnectPromise = sequelize.authenticate()
+        .then(() => {
+            console.log('Database connection established successfully.');
+            return sequelize.sync({ alter: true });
+        })
+        .then(() => {
+            console.log('Database models synchronized successfully.');
+        })
+        .catch((error) => {
+            console.error('Database connection/sync error:', error);
+            console.warn('Server will start without database connection. Some features may not work.');
+        });
 
-    app.listen(PORT, () => {
+    // Запускаем сервер независимо от результата подключения к БД
+    app.listen(PORT, '0.0.0.0', () => {
         console.log(`Server is running on port ${PORT}`);
+        console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
         
         // Запускаем периодическую очистку истории (каждые 24 часа)
         const cleanupIntervalHours = parseInt(process.env.HISTORY_CLEANUP_INTERVAL_HOURS || '24', 10);
         historyCleanupService.startPeriodicCleanup(cleanupIntervalHours);
     });
+
+    // Ждем подключения к БД (но не блокируем запуск сервера)
+    await dbConnectPromise;
 };
 
 startServer();
