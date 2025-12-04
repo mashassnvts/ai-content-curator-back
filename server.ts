@@ -13,6 +13,7 @@ import './models/AnalysisHistory';
 import './models/BotProfile';
 import './models/BotAnalysisHistory';
 import './models/UserInterestLevel';
+import './models/ContentRelevanceScore';
 import historyCleanupService from './services/history-cleanup.service';
 
 dotenv.config();

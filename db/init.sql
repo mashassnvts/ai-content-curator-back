@@ -34,9 +34,9 @@ CREATE TABLE user_feedback (
 );
 
 -- Уровни пользователя по интересам (для анализа релевантности контента)
--- Создаем ENUM тип для уровней
+-- Создаем ENUM тип для уровней (3 уровня: новичок, любитель, профессионал)
 DO $$ BEGIN
-    CREATE TYPE enum_user_interest_levels_level AS ENUM ('beginner', 'intermediate', 'advanced', 'expert');
+    CREATE TYPE enum_user_interest_levels_level AS ENUM ('novice', 'amateur', 'professional');
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
@@ -45,10 +45,25 @@ CREATE TABLE IF NOT EXISTS user_interest_levels (
     id SERIAL PRIMARY KEY,
     user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     interest VARCHAR(255) NOT NULL,
-    level enum_user_interest_levels_level NOT NULL DEFAULT 'beginner',
+    level enum_user_interest_levels_level NOT NULL DEFAULT 'novice',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, interest)
+);
+
+-- Таблица для хранения оценок релевантности контента по интересам
+-- Оценка профессиональности контента для каждого интереса пользователя
+CREATE TABLE IF NOT EXISTS content_relevance_scores (
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    interest VARCHAR(255) NOT NULL,
+    url TEXT NOT NULL,
+    content_level VARCHAR(20) NOT NULL, -- 'novice', 'amateur', 'professional' - уровень профессиональности контента
+    relevance_score INT NOT NULL, -- Оценка релевантности от 0 до 100
+    explanation TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, interest, url)
 );
 
 

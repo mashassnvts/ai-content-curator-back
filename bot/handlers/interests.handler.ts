@@ -29,10 +29,9 @@ export const showInterests = async (bot: TelegramBot, chatId: number, telegramId
     }
     
     const levelNames: Record<string, string> = {
-        'beginner': '🟢 Новичок',
-        'intermediate': '🟡 Средний',
-        'advanced': '🟠 Продвинутый',
-        'expert': '🔴 Эксперт'
+        'novice': '🟢 Новичок',
+        'amateur': '🟡 Любитель',
+        'professional': '🔴 Профессионал'
     };
 
     if (filteredInterests.length === 0) {
@@ -105,15 +104,14 @@ export const handleAddInterestInput = async (bot: TelegramBot, chatId: number, t
         const levelKeyboard = {
             inline_keyboard: [
                 [
-                    { text: '🟢 Новичок', callback_data: `${SET_LEVEL_PREFIX}${interestName}|beginner` },
-                    { text: '🟡 Средний', callback_data: `${SET_LEVEL_PREFIX}${interestName}|intermediate` }
+                    { text: '🟢 Новичок', callback_data: `${SET_LEVEL_PREFIX}${interestName}|novice` },
+                    { text: '🟡 Любитель', callback_data: `${SET_LEVEL_PREFIX}${interestName}|amateur` }
                 ],
                 [
-                    { text: '🟠 Продвинутый', callback_data: `${SET_LEVEL_PREFIX}${interestName}|advanced` },
-                    { text: '🔴 Эксперт', callback_data: `${SET_LEVEL_PREFIX}${interestName}|expert` }
+                    { text: '🔴 Профессионал', callback_data: `${SET_LEVEL_PREFIX}${interestName}|professional` }
                 ],
                 [
-                    { text: '⏭️ Пропустить (новичок)', callback_data: `${SET_LEVEL_PREFIX}${interestName}|beginner|skip` }
+                    { text: '⏭️ Пропустить (новичок)', callback_data: `${SET_LEVEL_PREFIX}${interestName}|novice|skip` }
                 ]
             ]
         };
@@ -122,19 +120,18 @@ export const handleAddInterestInput = async (bot: TelegramBot, chatId: number, t
             chatId,
             `📊 Выберите ваш уровень в "${interestName}":\n\n` +
             `🟢 Новичок - только начинаю\n` +
-            `🟡 Средний - есть базовые знания\n` +
-            `🟠 Продвинутый - глубокие знания\n` +
-            `🔴 Эксперт - профессионал`,
+            `🟡 Любитель - есть базовые знания и опыт\n` +
+            `🔴 Профессионал - глубокие знания и опыт`,
             { reply_markup: levelKeyboard }
         );
         return;
     }
 
-    // Если несколько интересов, добавляем все с уровнем по умолчанию (beginner)
+    // Если несколько интересов, добавляем все с уровнем по умолчанию (novice)
     const { activeInterests } = await botUserService.getUserInterests(telegramId);
     
     for (const interestName of interestsToAdd) {
-        await botUserService.addInterest(telegramId, interestName, 'beginner');
+        await botUserService.addInterest(telegramId, interestName, 'novice');
     }
 
     // Добавляем новые интересы в активные
@@ -177,10 +174,9 @@ export const handleSetInterestLevelCallback = async (bot: TelegramBot, query: Ca
         clearPendingAction(telegramId);
         
         const levelNames: Record<string, string> = {
-            'beginner': '🟢 Новичок',
-            'intermediate': '🟡 Средний',
-            'advanced': '🟠 Продвинутый',
-            'expert': '🔴 Эксперт'
+            'novice': '🟢 Новичок',
+            'amateur': '🟡 Любитель',
+            'professional': '🔴 Профессионал'
         };
         
         await bot.editMessageText(

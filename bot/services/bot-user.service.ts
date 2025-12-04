@@ -195,8 +195,19 @@ class BotUserService {
             return;
         }
 
-        const validLevels = ['beginner', 'intermediate', 'advanced', 'expert'];
-        const userLevel = level && validLevels.includes(level) ? level : 'beginner'; // По умолчанию beginner
+        const validLevels = ['novice', 'amateur', 'professional'];
+        
+        // Миграция старых значений на новые
+        let normalizedLevel = level;
+        if (level === 'beginner' || level === 'intermediate') {
+            normalizedLevel = 'novice';
+        } else if (level === 'advanced') {
+            normalizedLevel = 'amateur';
+        } else if (level === 'expert') {
+            normalizedLevel = 'professional';
+        }
+        
+        const userLevel = normalizedLevel && validLevels.includes(normalizedLevel) ? normalizedLevel : 'novice'; // По умолчанию novice
 
         if (profile.mode === 'linked' && profile.user_id) {
             const existingInterests = await UserInterest.findAll({
@@ -227,12 +238,12 @@ class BotUserService {
                         defaults: {
                             userId: profile.user_id,
                             interest: value.toLowerCase().trim(),
-                            level: userLevel as 'beginner' | 'intermediate' | 'advanced' | 'expert',
+                            level: userLevel as 'novice' | 'amateur' | 'professional',
                         },
                     });
                     
                     if (userLevelRecord.level !== userLevel) {
-                        userLevelRecord.level = userLevel as 'beginner' | 'intermediate' | 'advanced' | 'expert';
+                        userLevelRecord.level = userLevel as 'novice' | 'amateur' | 'professional';
                         await userLevelRecord.save();
                     }
                     
