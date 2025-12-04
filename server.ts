@@ -23,12 +23,17 @@ const app: Application = express();
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
 const corsOptions = {
-    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : ['http://localhost:3000', 'http://127.0.0.1:3000'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((origin: string) => origin.trim()) : ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+    credentials: true, // Разрешаем отправку cookies
+    optionsSuccessStatus: 200, // Для старых браузеров
 };
 
 app.use(cors(corsOptions));
+
+// Явно обрабатываем preflight запросы
+app.options('*', cors(corsOptions));
 app.use(express.json()); // Ensure JSON bodies are parsed
 
 // Remove urlencoded parser if it exists, to avoid conflicts
@@ -47,6 +52,15 @@ app.get('/', (req: Request, res: Response) => {
 // Error handling middleware (must be last)
 app.use((err: any, req: Request, res: Response, next: any) => {
     console.error('Unhandled error:', err);
+    console.error('Error stack:', err.stack);
+    
+    // Убеждаемся, что CORS заголовки установлены даже при ошибке
+    const origin = req.headers.origin;
+    if (origin && corsOptions.origin.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+    }
+    
     res.status(500).json({ message: 'Internal server error', error: err.message });
 });
 
