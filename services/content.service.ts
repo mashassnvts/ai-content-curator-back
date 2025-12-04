@@ -25,6 +25,22 @@ class ContentService {
             // 1. Приоритет для YouTube: Встроенный транскрипт (быстро и полно)
             if (videoPlatform === 'youtube') {
                 try {
+                    // Сначала пробуем библиотеку youtube-transcript (не требует браузер)
+                    try {
+                        const { YoutubeTranscript } = await import('youtube-transcript');
+                        const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+                        const transcriptText = transcriptItems.map(item => item.text).join(' ');
+                        
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓ Using youtube-transcript library (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
+                        }
+                    } catch (youtubeTranscriptError: any) {
+                        console.log(`⚠️ youtube-transcript library failed: ${youtubeTranscriptError.message}`);
+                        console.log(`   Trying Puppeteer fallback...`);
+                    }
+                    
+                    // Fallback на Puppeteer (только если youtube-transcript не сработал)
                     // Добавляем общий таймаут на получение транскрипта (45 секунд)
                     const transcriptText = await Promise.race([
                         this.getYouTubeTranscript(url),
@@ -34,7 +50,7 @@ class ContentService {
                     ]);
                     
                     if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓ Using YouTube transcript for analysis (${transcriptText.length} chars)`);
+                        console.log(`✓ Using YouTube transcript (Puppeteer) for analysis (${transcriptText.length} chars)`);
                         return { content: transcriptText, sourceType: 'transcript' };
                     }
                 } catch (error: any) {
@@ -142,7 +158,54 @@ class ContentService {
             throw new Error(`Не удалось извлечь контент из видео с платформы ${videoPlatform}. Возможно, видео приватно или недоступно.`);
         } else {
             // ... (Статья с Puppeteer)
-            return this.scrapeArticleWithPuppeteer(url);
+            try {
+                return await this.scrapeArticleWithPuppeteer(url);
+            } catch (puppeteerError: any) {
+                const errorMsg = puppeteerError.message || 'Unknown error';
+                console.warn(`⚠️ Puppeteer scraping failed: ${errorMsg}`);
+                
+                // Проверяем, является ли ошибка связанной с отсутствием Chrome
+                if (errorMsg.includes('Could not find Chrome') || 
+                    errorMsg.includes('Chrome not found') || 
+                    errorMsg.includes('Chrome/Chromium not available') ||
+                    !process.env.PUPPETEER_EXECUTABLE_PATH) {
+                    // Пробуем извлечь базовые метаданные через HTTP запрос (без браузера)
+                    try {
+                        console.log('Attempting to extract basic metadata without browser...');
+                        const response = await fetch(url, {
+                            headers: {
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                            }
+                        });
+                        const html = await response.text();
+                        
+                        // Извлекаем og:tags и title из HTML
+                        const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+                        const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+                        const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+                        
+                        const title = ogTitleMatch?.[1] || titleMatch?.[1] || '';
+                        const description = ogDescMatch?.[1] || '';
+                        
+                        if (title || description) {
+                            const contentParts: string[] = [];
+                            if (title) contentParts.push(`Название: ${title}`);
+                            if (description) contentParts.push(`\n\nОписание: ${description}`);
+                            
+                            const content = contentParts.join('') + 
+                                '\n\n⚠️ ВАЖНО: Это только базовые метаданные страницы. Полный контент статьи недоступен без браузера.';
+                            
+                            console.log(`✓ Extracted basic metadata without browser (title: ${title ? 'yes' : 'no'}, desc: ${description ? 'yes' : 'no'})`);
+                            return { content, sourceType: 'metadata' };
+                        }
+                    } catch (fetchError: any) {
+                        console.warn(`⚠️ Basic metadata extraction failed: ${fetchError.message}`);
+                    }
+                }
+                
+                // Если ничего не получилось, выбрасываем понятную ошибку
+                throw new Error(`Не удалось извлечь контент из статьи. ${errorMsg.includes('Chrome') ? 'Браузер недоступен на этом сервере.' : errorMsg}`);
+            }
         }
     }
 
@@ -150,6 +213,13 @@ class ContentService {
         let browser = null;
         try {
             console.log('Launching browser to extract YouTube transcript...');
+            
+            // Проверяем, доступен ли Chrome/Chromium
+            if (!process.env.PUPPETEER_EXECUTABLE_PATH) {
+                console.warn('⚠️ PUPPETEER_EXECUTABLE_PATH not set. Puppeteer may not work on this system.');
+                throw new Error('Chrome/Chromium not available. Use youtube-transcript library instead.');
+            }
+            
             const launchOptions: any = {
                 headless: true,
                 protocolTimeout: 120000, // 2 минуты для protocol timeout
@@ -163,9 +233,7 @@ class ContentService {
                 ]
             };
             // Используем системный Chromium, если указан путь
-            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-            }
+            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
             
             // Добавляем таймаут на запуск браузера (30 секунд)
             browser = await Promise.race([
@@ -510,7 +578,8 @@ class ContentService {
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
             console.error(`✗ Puppeteer scraping failed: ${errorMessage}`);
-            return { content: `Failed to scrape article: ${errorMessage}`, sourceType: 'article' };
+            // Выбрасываем ошибку вместо возврата сообщения об ошибке как контента
+            throw new Error(`Не удалось извлечь контент из статьи. ${errorMessage}`);
         } finally {
             if (browser) {
                 await browser.close();
