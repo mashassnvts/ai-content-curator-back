@@ -227,13 +227,39 @@ class ContentService {
                 ]
             };
             
-            // Используем системный Chromium, если указан путь, иначе Puppeteer попытается использовать встроенный Chrome
+            // Используем системный Chromium, если указан путь
             if (process.env.PUPPETEER_EXECUTABLE_PATH) {
                 launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
                 console.log('Using system Chrome/Chromium from PUPPETEER_EXECUTABLE_PATH');
             } else {
-                console.log('PUPPETEER_EXECUTABLE_PATH not set. Puppeteer will try to use bundled Chrome.');
-                console.log('If this fails, install Chrome/Chromium and set PUPPETEER_EXECUTABLE_PATH environment variable.');
+                // Пытаемся найти Chrome в стандартных местах или использовать встроенный
+                const possiblePaths = [
+                    '/usr/bin/chromium',
+                    '/usr/bin/chromium-browser',
+                    '/usr/bin/google-chrome',
+                    '/usr/bin/google-chrome-stable',
+                ];
+                
+                let foundPath = null;
+                for (const path of possiblePaths) {
+                    try {
+                        const fs = await import('fs');
+                        if (fs.existsSync(path)) {
+                            foundPath = path;
+                            break;
+                        }
+                    } catch (e) {
+                        // Игнорируем ошибки проверки
+                    }
+                }
+                
+                if (foundPath) {
+                    launchOptions.executablePath = foundPath;
+                    console.log(`Found Chrome/Chromium at: ${foundPath}`);
+                } else {
+                    console.log('PUPPETEER_EXECUTABLE_PATH not set and Chrome not found in standard paths.');
+                    console.log('Puppeteer will try to use bundled Chrome (if available).');
+                }
             }
             
             // Добавляем таймаут на запуск браузера (30 секунд)

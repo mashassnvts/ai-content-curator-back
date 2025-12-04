@@ -6,6 +6,7 @@
     "start": "node dist/server.js",
     "clean": "rimraf dist",
     "build": "npm run clean && tsc",
+    "postinstall": "node -e \"if (process.env.INSTALL_CHROME === 'true') { require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit'}) }\"",
     "dev": "ts-node-dev --respawn --transpile-only server.ts",
     "bot": "ts-node-dev --respawn --transpile-only bot-runner.ts",
     "bot:dev": "ts-node bot-runner.ts",
