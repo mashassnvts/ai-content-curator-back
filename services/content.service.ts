@@ -214,12 +214,6 @@ class ContentService {
         try {
             console.log('Launching browser to extract YouTube transcript...');
             
-            // Проверяем, доступен ли Chrome/Chromium
-            if (!process.env.PUPPETEER_EXECUTABLE_PATH) {
-                console.warn('⚠️ PUPPETEER_EXECUTABLE_PATH not set. Puppeteer may not work on this system.');
-                throw new Error('Chrome/Chromium not available. Use youtube-transcript library instead.');
-            }
-            
             const launchOptions: any = {
                 headless: true,
                 protocolTimeout: 120000, // 2 минуты для protocol timeout
@@ -232,8 +226,15 @@ class ContentService {
                     '--disable-gpu' // Отключаем GPU для стабильности
                 ]
             };
-            // Используем системный Chromium, если указан путь
-            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+            
+            // Используем системный Chromium, если указан путь, иначе Puppeteer попытается использовать встроенный Chrome
+            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+                console.log('Using system Chrome/Chromium from PUPPETEER_EXECUTABLE_PATH');
+            } else {
+                console.log('PUPPETEER_EXECUTABLE_PATH not set. Puppeteer will try to use bundled Chrome.');
+                console.log('If this fails, install Chrome/Chromium and set PUPPETEER_EXECUTABLE_PATH environment variable.');
+            }
             
             // Добавляем таймаут на запуск браузера (30 секунд)
             browser = await Promise.race([
