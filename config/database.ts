@@ -1,0 +1,33 @@
+import { Sequelize } from 'sequelize';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+const dbUri = process.env.DATABASE_URL;
+
+if (!dbUri) {
+    throw new Error('DATABASE_URL is not defined in .env file');
+}
+
+// Проверяем, что DATABASE_URL содержит имя БД
+const urlMatch = dbUri.match(/postgresql:\/\/([^:]+):([^@]+)@([^:]+):(\d+)\/(.+)/);
+if (!urlMatch) {
+    throw new Error('Invalid DATABASE_URL format');
+}
+
+const [, username, password, host, port, database] = urlMatch;
+
+console.log(`[DB Config] DATABASE_URL: ${dbUri.replace(/:[^:@]+@/, ':****@')}`);
+console.log(`[DB Config] Parsed - database: ${database}, host: ${host}, port: ${port}, user: ${username}`);
+
+// Используем полный DATABASE_URL напрямую - Sequelize правильно его парсит
+const sequelize = new Sequelize(dbUri, {
+    dialect: 'postgres',
+    logging: false,
+    // Явно указываем, что не нужно использовать имя пользователя как имя БД
+    dialectOptions: {
+        // Дополнительные опции для PostgreSQL
+    },
+});
+
+export default sequelize;
