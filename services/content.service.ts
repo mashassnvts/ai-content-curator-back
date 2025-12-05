@@ -209,58 +209,109 @@ class ContentService {
         }
     }
 
+    /**
+     * Вспомогательная функция для получения настроек запуска Puppeteer с автоматическим поиском Chrome
+     */
+    private async getPuppeteerLaunchOptions(additionalArgs: string[] = []): Promise<any> {
+        const launchOptions: any = {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--lang=ru-RU,ru',
+                '--disable-features=TranslateUI',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                ...additionalArgs
+            ]
+        };
+        
+        // Используем системный Chromium, если указан путь
+        if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+            console.log('Using system Chrome/Chromium from PUPPETEER_EXECUTABLE_PATH');
+            return launchOptions;
+        }
+        
+        // Пытаемся найти Chrome в стандартных местах или использовать встроенный
+        const possiblePaths = [
+            '/usr/bin/chromium',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/google-chrome',
+            '/usr/bin/google-chrome-stable',
+        ];
+        
+        let foundPath = null;
+        const fsModule = await import('fs');
+        
+        // Сначала проверяем стандартные пути
+        for (const path of possiblePaths) {
+            try {
+                if (fsModule.existsSync(path)) {
+                    foundPath = path;
+                    break;
+                }
+            } catch (e) {
+                // Игнорируем ошибки проверки
+            }
+        }
+        
+        // Если не нашли, пытаемся использовать Chrome, установленный через Puppeteer
+        if (!foundPath) {
+            try {
+                const puppeteerCore = await import('puppeteer-core');
+                const puppeteerPath = puppeteerCore.executablePath();
+                if (puppeteerPath && fsModule.existsSync(puppeteerPath)) {
+                    foundPath = puppeteerPath;
+                    console.log(`Found Puppeteer-installed Chrome at: ${foundPath}`);
+                }
+            } catch (e) {
+                // Игнорируем ошибки
+            }
+        }
+        
+        // Проверяем путь к кэшу Puppeteer (для Render.com)
+        if (!foundPath) {
+            const cachePath = process.env.PUPPETEER_CACHE_DIR || 
+                             (process.env.HOME ? `${process.env.HOME}/.cache/puppeteer` : null) ||
+                             '/opt/render/.cache/puppeteer';
+            try {
+                if (fsModule.existsSync(cachePath)) {
+                    const chromeDirs = fsModule.readdirSync(cachePath).filter((dir: string) => 
+                        dir.startsWith('chrome') || dir.startsWith('chromium')
+                    );
+                    for (const dir of chromeDirs) {
+                        const chromePath = `${cachePath}/${dir}/chrome-linux64/chrome`;
+                        if (fsModule.existsSync(chromePath)) {
+                            foundPath = chromePath;
+                            console.log(`Found Chrome in Puppeteer cache at: ${foundPath}`);
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {
+                // Игнорируем ошибки
+            }
+        }
+        
+        if (foundPath) {
+            launchOptions.executablePath = foundPath;
+            console.log(`Using Chrome/Chromium at: ${foundPath}`);
+        } else {
+            console.log('PUPPETEER_EXECUTABLE_PATH not set and Chrome not found in standard paths.');
+            console.log('Puppeteer will try to use bundled Chrome (if available).');
+        }
+        
+        return launchOptions;
+    }
+
     private async getYouTubeTranscript(url: string): Promise<string> {
         let browser = null;
         try {
             console.log('Launching browser to extract YouTube transcript...');
             
-            const launchOptions: any = {
-                headless: true,
-                protocolTimeout: 120000, // 2 минуты для protocol timeout
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--lang=ru-RU,ru',
-                    '--disable-features=TranslateUI',
-                    '--disable-dev-shm-usage', // Помогает избежать проблем с памятью в Docker
-                    '--disable-gpu' // Отключаем GPU для стабильности
-                ]
-            };
-            
-            // Используем системный Chromium, если указан путь
-            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-                console.log('Using system Chrome/Chromium from PUPPETEER_EXECUTABLE_PATH');
-            } else {
-                // Пытаемся найти Chrome в стандартных местах или использовать встроенный
-                const possiblePaths = [
-                    '/usr/bin/chromium',
-                    '/usr/bin/chromium-browser',
-                    '/usr/bin/google-chrome',
-                    '/usr/bin/google-chrome-stable',
-                ];
-                
-                let foundPath = null;
-                for (const path of possiblePaths) {
-                    try {
-                        const fs = await import('fs');
-                        if (fs.existsSync(path)) {
-                            foundPath = path;
-                            break;
-                        }
-                    } catch (e) {
-                        // Игнорируем ошибки проверки
-                    }
-                }
-                
-                if (foundPath) {
-                    launchOptions.executablePath = foundPath;
-                    console.log(`Found Chrome/Chromium at: ${foundPath}`);
-                } else {
-                    console.log('PUPPETEER_EXECUTABLE_PATH not set and Chrome not found in standard paths.');
-                    console.log('Puppeteer will try to use bundled Chrome (if available).');
-                }
-            }
+            const launchOptions = await this.getPuppeteerLaunchOptions();
+            launchOptions.protocolTimeout = 120000; // 2 минуты для protocol timeout
             
             // Добавляем таймаут на запуск браузера (30 секунд)
             browser = await Promise.race([
@@ -559,14 +610,7 @@ class ContentService {
         let browser = null;
         try {
             console.log('Initializing headless browser...');
-            const launchOptions: any = {
-                headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox']
-            };
-            // Используем системный Chromium, если указан путь
-            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-            }
+            const launchOptions = await this.getPuppeteerLaunchOptions();
             browser = await puppeteer.launch(launchOptions);
             console.log('✓ Headless browser initialized.');
 
@@ -621,20 +665,7 @@ class ContentService {
         let browser = null;
         try {
             console.log(`Extracting metadata from ${platform} video: ${url}`);
-            const launchOptions: any = {
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--lang=ru-RU,ru',
-                    '--disable-features=TranslateUI'
-                ]
-            };
-            
-            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-            }
-            
+            const launchOptions = await this.getPuppeteerLaunchOptions();
             browser = await puppeteer.launch(launchOptions);
             const page = await browser.newPage();
             
@@ -970,20 +1001,7 @@ class ContentService {
         let browser = null;
         try {
             console.log(`Extracting basic metadata (og:tags) from: ${url}`);
-            const launchOptions: any = {
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--lang=ru-RU,ru',
-                    '--disable-features=TranslateUI'
-                ]
-            };
-            
-            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
-            }
-            
+            const launchOptions = await this.getPuppeteerLaunchOptions();
             browser = await puppeteer.launch(launchOptions);
             const page = await browser.newPage();
             
