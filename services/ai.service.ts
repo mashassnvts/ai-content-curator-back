@@ -64,13 +64,17 @@ async function generateCompletionWithRetry(
             const errorMessage = String(error.message || error || JSON.stringify(error));
             const errorCode = error.code || error.status || error.statusCode || '';
             
-            // Retry на таймауты, 503, 429 (rate limit - можно повторить)
+            // Retry на таймауты, 429 (rate limit - можно повторить)
+            // НЕ retry на 503 (overloaded) - лучше попробовать другую модель
             // НЕ retry на QUOTA_EXCEEDED (дневной лимит исчерпан)
-            const isRetryable = errorMessage.includes('503') || 
-                               errorMessage.includes('429') || 
+            const isOverloaded = errorMessage.includes('overloaded') || 
+                                errorMessage.includes('UNAVAILABLE') ||
+                                (errorCode === 503 && errorMessage.includes('overloaded'));
+            
+            const isRetryable = errorMessage.includes('429') || 
                                errorMessage.includes('timed out') ||
                                (errorMessage.includes('RESOURCE_EXHAUSTED') && !errorMessage.includes('QUOTA_EXCEEDED')) ||
-                               errorCode === 503 ||
+                               (errorCode === 503 && !isOverloaded) || // 503 без "overloaded" - можно повторить
                                errorCode === 429;
             
             const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
@@ -79,6 +83,9 @@ async function generateCompletionWithRetry(
             
             if (isQuotaExceeded) {
                 // Дневной лимит исчерпан - не retry
+                throw error;
+            } else if (isOverloaded) {
+                // Модель перегружена - не retry, пробуем другую модель
                 throw error;
             } else if (isRetryable) {
                 console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage}). Retrying in ${delay / 1000}s...`);
@@ -368,7 +375,57 @@ ${feedbackContext}
         }
         
         console.log('Sending request to Gemini API...');
-        const result = await generateCompletionWithRetry(aiModel, systemInstruction, jsonPrompt);
+        
+        // Список моделей для fallback при ошибке 503 (модель перегружена)
+        const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+        const currentModelIndex = fallbackModels.indexOf(aiModel);
+        const modelsToTry = currentModelIndex >= 0 
+            ? fallbackModels.slice(currentModelIndex) 
+            : [aiModel, ...fallbackModels];
+        
+        let result: any = null;
+        let lastError: any = null;
+        
+        for (const modelToTry of modelsToTry) {
+            try {
+                console.log(`🤖 Trying model: ${modelToTry}`);
+                result = await generateCompletionWithRetry(modelToTry, systemInstruction, jsonPrompt);
+                if (modelToTry !== aiModel) {
+                    console.log(`✓ Fallback to ${modelToTry} succeeded`);
+                }
+                break; // Успешно получили ответ
+            } catch (error: any) {
+                lastError = error;
+                const errorMessage = String(error.message || error || JSON.stringify(error));
+                const errorCode = error.code || error.status || error.statusCode || '';
+                
+                // Если это 503 (модель перегружена) и есть еще модели для попытки - пробуем следующую
+                const isOverloaded = errorMessage.includes('503') || 
+                                    errorMessage.includes('overloaded') || 
+                                    errorMessage.includes('UNAVAILABLE') ||
+                                    errorCode === 503;
+                
+                const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
+                                       errorMessage.includes('quota exceeded') ||
+                                       errorMessage.includes('daily quota');
+                
+                // Если квота исчерпана или это не ошибка перегрузки - не пробуем другие модели
+                if (isQuotaExceeded || !isOverloaded) {
+                    throw error;
+                }
+                
+                // Если это последняя модель в списке - выбрасываем ошибку
+                if (modelsToTry.indexOf(modelToTry) === modelsToTry.length - 1) {
+                    throw error;
+                }
+                
+                console.log(`⚠️ Model ${modelToTry} is overloaded (503). Trying next fallback model...`);
+            }
+        }
+        
+        if (!result) {
+            throw lastError || new Error('All models failed');
+        }
         
         // Логируем структуру ответа для диагностики
         console.log('Gemini API response structure:', JSON.stringify(Object.keys(result || {}), null, 2));
