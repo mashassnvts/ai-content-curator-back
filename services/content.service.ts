@@ -42,14 +42,20 @@ class ContentService {
                     
                     // Fallback 1: ScrapingBee API (не требует браузеров)
                     try {
+                        console.log('🔍 Attempting ScrapingBee for transcript extraction...');
                         const scrapingBeeContent = await this.extractWithScrapingBee(url);
                         if (scrapingBeeContent) {
+                            console.log(`✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
                             // Пытаемся извлечь транскрипт из HTML через ScrapingBee
                             const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
                             if (transcriptText && transcriptText.trim().length > 50) {
                                 console.log(`✓ Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
                                 return { content: transcriptText, sourceType: 'transcript' };
+                            } else {
+                                console.log(`⚠️ ScrapingBee HTML received but transcript not found in HTML`);
                             }
+                        } else {
+                            console.log(`⚠️ ScrapingBee returned empty content`);
                         }
                     } catch (scrapingBeeError: any) {
                         console.log(`⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
@@ -443,59 +449,208 @@ class ContentService {
      */
     private async extractTranscriptFromHTML(html: string, url: string): Promise<string | null> {
         try {
-            const cheerio = await import('cheerio');
-            const $ = cheerio.load(html);
+            // Извлекаем video ID из URL
+            const videoIdMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
+            const videoId = videoIdMatch ? videoIdMatch[1] : null;
             
-            // Ищем транскрипт в различных местах страницы
-            // YouTube хранит транскрипт в JSON данных страницы
-            const scripts = $('script').toArray();
+            if (!videoId) {
+                console.log('⚠️ Could not extract video ID from URL');
+                return null;
+            }
+
+            // Метод 1: Ищем транскрипт в JSON данных страницы
+            const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
             
-            for (const script of scripts) {
-                const scriptContent = $(script).html() || '';
+            for (const scriptTag of scripts) {
+                const scriptContent = scriptTag.replace(/<\/?script[^>]*>/gi, '');
                 
-                // Ищем ytInitialPlayerResponse или ytInitialData
-                if (scriptContent.includes('ytInitialPlayerResponse') || scriptContent.includes('captionTracks')) {
+                // Ищем ytInitialPlayerResponse
+                if (scriptContent.includes('ytInitialPlayerResponse')) {
                     try {
-                        // Извлекаем JSON данные
-                        const match = scriptContent.match(/var ytInitialPlayerResponse = ({.+?});/);
-                        if (match) {
-                            const data = JSON.parse(match[1]);
-                            const captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-                            
-                            if (captionTracks && captionTracks.length > 0) {
-                                // Берем первый доступный трек (обычно это оригинальный язык)
-                                const captionUrl = captionTracks[0].baseUrl;
-                                
-                                if (captionUrl) {
-                                    // Загружаем транскрипт по URL
-                                    const axios = await import('axios');
-                                    const transcriptResponse = await axios.default.get(captionUrl);
+                        // Пробуем разные паттерны для извлечения JSON
+                        const patterns = [
+                            /var ytInitialPlayerResponse = ([\s\S]+?);/,
+                            /"ytInitialPlayerResponse"\s*:\s*([\s\S]+?)(?=;|$)/,
+                            /ytInitialPlayerResponse\s*=\s*([\s\S]+?);/
+                        ];
+                        
+                        for (const pattern of patterns) {
+                            const match = scriptContent.match(pattern);
+                            if (match && match[1]) {
+                                try {
+                                    // Очищаем JSON от возможных лишних символов
+                                    let jsonStr = match[1].trim();
+                                    // Убираем завершающие точки с запятой или другие символы
+                                    jsonStr = jsonStr.replace(/;[\s]*$/, '');
                                     
-                                    // Парсим XML транскрипта
-                                    const transcriptXml = transcriptResponse.data;
-                                    const transcriptItems: string[] = [];
+                                    const data = JSON.parse(jsonStr);
                                     
-                                    const transcriptMatches = transcriptXml.matchAll(/<text[^>]*>([^<]+)<\/text>/g);
-                                    for (const match of transcriptMatches) {
-                                        transcriptItems.push(match[1].trim());
+                                    // Ищем captionTracks в разных местах структуры
+                                    let captionTracks = null;
+                                    if (data?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+                                        captionTracks = data.captions.playerCaptionsTracklistRenderer.captionTracks;
+                                    } else if (data?.captions?.playerCaptionsRenderer?.captionTracks) {
+                                        captionTracks = data.captions.playerCaptionsRenderer.captionTracks;
+                                    } else if (data?.videoDetails?.captionTracks) {
+                                        captionTracks = data.videoDetails.captionTracks;
+                                    } else if (data?.captionTracks) {
+                                        captionTracks = data.captionTracks;
                                     }
                                     
-                                    if (transcriptItems.length > 0) {
-                                        return transcriptItems.join(' ');
+                                    if (captionTracks && Array.isArray(captionTracks) && captionTracks.length > 0) {
+                                        // Ищем русский или английский трек, или берем первый доступный
+                                        let captionTrack = captionTracks.find((track: any) => 
+                                            (track.languageCode === 'ru' || track.languageCode === 'en') && 
+                                            (track.baseUrl || track.url)
+                                        ) || captionTracks.find((track: any) => track.baseUrl || track.url);
+                                        
+                                        if (captionTrack) {
+                                            const captionUrl = captionTrack.baseUrl || captionTrack.url;
+                                            
+                                            if (captionUrl) {
+                                                console.log(`Found caption track: ${captionTrack.languageCode || 'unknown'}`);
+                                                const transcript = await this.downloadTranscriptFromUrl(captionUrl);
+                                                if (transcript) {
+                                                    return transcript;
+                                                }
+                                            }
+                                        }
                                     }
+                                } catch (parseError: any) {
+                                    // Пробуем следующий паттерн или ищем другим способом
+                                    if (!parseError.message.includes('Unexpected token')) {
+                                        console.log(`JSON parse error: ${parseError.message.substring(0, 100)}`);
+                                    }
+                                    continue;
                                 }
                             }
                         }
+                        
+                        // Альтернативный метод: ищем captionTracks напрямую в тексте
+                        if (scriptContent.includes('captionTracks')) {
+                            try {
+                                // Ищем массив captionTracks
+                                const captionTracksMatch = scriptContent.match(/captionTracks["\s]*:[\s]*\[([^\]]+)\]/);
+                                if (captionTracksMatch) {
+                                    // Ищем baseUrl в найденном фрагменте
+                                    const baseUrlMatch = captionTracksMatch[1].match(/baseUrl["\s]*:["\s]*"([^"]+)"/);
+                                    if (baseUrlMatch && baseUrlMatch[1]) {
+                                        console.log('Found caption URL via alternative method');
+                                        const transcript = await this.downloadTranscriptFromUrl(baseUrlMatch[1]);
+                                        if (transcript) {
+                                            return transcript;
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                // Игнорируем ошибки альтернативного метода
+                            }
+                        }
                     } catch (e) {
-                        // Продолжаем поиск в других скриптах
+                        // Продолжаем поиск
                         continue;
+                    }
+                }
+            }
+            
+            // Метод 2: Прямой запрос к YouTube API для получения транскрипта
+            try {
+                const transcriptUrl = await this.getYouTubeTranscriptUrl(videoId);
+                if (transcriptUrl) {
+                    return await this.downloadTranscriptFromUrl(transcriptUrl);
+                }
+            } catch (e) {
+                console.log(`⚠️ Direct transcript URL fetch failed: ${e}`);
+            }
+            
+            return null;
+        } catch (error: any) {
+            console.log(`⚠️ Failed to extract transcript from HTML: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Загружает транскрипт по URL
+     */
+    private async downloadTranscriptFromUrl(captionUrl: string): Promise<string | null> {
+        try {
+            const axios = await import('axios');
+            const transcriptResponse = await axios.default.get(captionUrl, {
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+            
+            const transcriptXml = transcriptResponse.data;
+            const transcriptItems: string[] = [];
+            
+            // Парсим XML транскрипта (YouTube использует формат timedtext)
+            const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]+)<\/text>/g);
+            for (const match of textMatches) {
+                const text = match[1]
+                    .replace(/&amp;/g, '&')
+                    .replace(/&lt;/g, '<')
+                    .replace(/&gt;/g, '>')
+                    .replace(/&quot;/g, '"')
+                    .replace(/&#39;/g, "'")
+                    .trim();
+                if (text) {
+                    transcriptItems.push(text);
+                }
+            }
+            
+            if (transcriptItems.length > 0) {
+                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items`);
+                return transcriptItems.join(' ');
+            }
+            
+            return null;
+        } catch (error: any) {
+            console.log(`⚠️ Failed to download transcript from URL: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Получает URL транскрипта напрямую через YouTube API
+     */
+    private async getYouTubeTranscriptUrl(videoId: string): Promise<string | null> {
+        try {
+            // Пробуем получить информацию о видео через YouTube Data API или через парсинг страницы
+            const axios = await import('axios');
+            
+            // Пробуем получить страницу видео с параметром для включения транскрипта
+            const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+            const response = await axios.default.get(videoUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                },
+                timeout: 15000
+            });
+            
+            const html = response.data;
+            const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+            
+            for (const scriptTag of scripts) {
+                const scriptContent = scriptTag.replace(/<\/?script[^>]*>/gi, '');
+                if (scriptContent.includes('captionTracks')) {
+                    const match = scriptContent.match(/captionTracks["\s]*:[\s]*\[([^\]]+)\]/);
+                    if (match) {
+                        // Извлекаем URL из JSON
+                        const urlMatch = match[1].match(/baseUrl["\s]*:["\s]*"([^"]+)"/);
+                        if (urlMatch) {
+                            return urlMatch[1];
+                        }
                     }
                 }
             }
             
             return null;
         } catch (error: any) {
-            console.log(`⚠️ Failed to extract transcript from HTML: ${error.message}`);
+            console.log(`⚠️ Failed to get transcript URL: ${error.message}`);
             return null;
         }
     }
