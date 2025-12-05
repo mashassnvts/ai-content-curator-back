@@ -37,21 +37,43 @@ class ContentService {
                         }
                     } catch (youtubeTranscriptError: any) {
                         console.log(`⚠️ youtube-transcript library failed: ${youtubeTranscriptError.message}`);
+                        console.log(`   Trying ScrapingBee fallback...`);
+                    }
+                    
+                    // Fallback 1: ScrapingBee API (не требует браузеров)
+                    try {
+                        const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                        if (scrapingBeeContent) {
+                            // Пытаемся извлечь транскрипт из HTML через ScrapingBee
+                            const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
+                            if (transcriptText && transcriptText.trim().length > 50) {
+                                console.log(`✓ Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
+                                return { content: transcriptText, sourceType: 'transcript' };
+                            }
+                        }
+                    } catch (scrapingBeeError: any) {
+                        console.log(`⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
                         console.log(`   Trying Puppeteer fallback...`);
                     }
                     
-                    // Fallback на Puppeteer (только если youtube-transcript не сработал)
+                    // Fallback 2: Puppeteer (только если предыдущие методы не сработали)
                     // Добавляем общий таймаут на получение транскрипта (45 секунд)
-                    const transcriptText = await Promise.race([
-                        this.getYouTubeTranscript(url),
-                        new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 45000)
-                        )
-                    ]);
-                    
-                    if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓ Using YouTube transcript (Puppeteer) for analysis (${transcriptText.length} chars)`);
-                        return { content: transcriptText, sourceType: 'transcript' };
+                    try {
+                        const transcriptText = await Promise.race([
+                            this.getYouTubeTranscript(url),
+                            new Promise<string>((_, reject) => 
+                                setTimeout(() => reject(new Error('Transcript extraction timeout')), 45000)
+                            )
+                        ]);
+                        
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓ Using YouTube transcript (Puppeteer) for analysis (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
+                        }
+                    } catch (puppeteerError: any) {
+                        const errorMsg = puppeteerError.message || 'Unknown error';
+                        console.warn(`⚠️ YouTube transcript extraction failed: ${errorMsg}`);
+                        console.warn(`   Proceeding to metadata fallback...`);
                     }
                 } catch (error: any) {
                     const errorMsg = error.message || 'Unknown error';
@@ -117,7 +139,37 @@ class ContentService {
                 console.log(`Falling back to Puppeteer extraction...`);
             }
 
-            // 4. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // 4. FALLBACK: Метаданные через ScrapingBee (не требует браузеров)
+            try {
+                const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                if (scrapingBeeContent) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(scrapingBeeContent);
+                    
+                    // Извлекаем метаданные (title, description)
+                    const title = $('meta[property="og:title"]').attr('content') || 
+                                 $('title').text() || 
+                                 $('h1').first().text();
+                    const description = $('meta[property="og:description"]').attr('content') || 
+                                      $('meta[name="description"]').attr('content') || '';
+                    
+                    if (title || description) {
+                        const contentParts: string[] = [];
+                        if (title) contentParts.push(`Название: ${title.trim()}`);
+                        if (description) contentParts.push(`\n\nОписание: ${description.trim()}`);
+                        
+                        const content = contentParts.join('') + 
+                            '\n\n⚠️ ВАЖНО: Это только метаданные видео (название, описание). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных.';
+                        
+                        console.log(`✓ Using ScrapingBee metadata for ${videoPlatform}`);
+                        return { content, sourceType: 'metadata' };
+                    }
+                }
+            } catch (scrapingBeeError: any) {
+                console.log(`⚠️ ScrapingBee metadata extraction failed: ${scrapingBeeError.message}`);
+            }
+            
+            // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
             try {
                 const metadata = await this.extractVideoMetadata(url, videoPlatform);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
@@ -128,7 +180,7 @@ class ContentService {
                 console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${error.message}`);
             }
 
-            // 5. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
+            // 6. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
             if (videoPlatform === 'youtube') {
                 try {
                     const videoInfo = await play.video_info(url);
@@ -141,7 +193,7 @@ class ContentService {
                 }
             }
             
-            // 6. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
+            // 7. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
             // Это гарантирует, что мы всегда получим хотя бы название и описание из og:tags
             try {
                 console.log(`🔄 Attempting final fallback: extracting basic metadata from page...`);
@@ -157,7 +209,48 @@ class ContentService {
             // Если даже базовые метаданные не получены, возвращаем минимальную информацию
             throw new Error(`Не удалось извлечь контент из видео с платформы ${videoPlatform}. Возможно, видео приватно или недоступно.`);
         } else {
-            // ... (Статья с Puppeteer)
+            // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
+            // Сначала пробуем ScrapingBee (не требует браузеров)
+            try {
+                const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                if (scrapingBeeContent) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(scrapingBeeContent);
+                    
+                    // Извлекаем основной контент статьи
+                    const mainContentSelectors = ['article', 'main', '.post-content', '.article-body', 'body'];
+                    let mainEl = null;
+                    for (const selector of mainContentSelectors) {
+                        const element = $(selector).first();
+                        if (element.length > 0) {
+                            mainEl = element;
+                            break;
+                        }
+                    }
+                    
+                    if (mainEl && mainEl.length > 0) {
+                        // Удаляем ненужные элементы
+                        mainEl.find('script, style, nav, header, footer, aside, form, button, .comments, #comments').remove();
+                        
+                        // Извлекаем текст
+                        const paragraphs = mainEl.find('p, h1, h2, h3, li, pre, code').toArray();
+                        const content = paragraphs
+                            .map((el: any) => $(el).text().trim())
+                            .filter((text: string) => text.length > 20)
+                            .join('\n\n');
+                        
+                        if (content.trim().length > 100) {
+                            console.log(`✓ Using ScrapingBee for article (${content.length} chars)`);
+                            return { content, sourceType: 'article' };
+                        }
+                    }
+                }
+            } catch (scrapingBeeError: any) {
+                console.log(`⚠️ ScrapingBee failed for article: ${scrapingBeeError.message}`);
+                console.log(`   Trying Puppeteer fallback...`);
+            }
+            
+            // Fallback на Puppeteer
             try {
                 return await this.scrapeArticleWithPuppeteer(url);
             } catch (puppeteerError: any) {
@@ -303,6 +396,108 @@ class ContentService {
         }
         
         return launchOptions;
+    }
+
+    /**
+     * Извлекает HTML контент через ScrapingBee API (не требует браузеров)
+     */
+    private async extractWithScrapingBee(url: string): Promise<string | null> {
+        const apiKey = process.env.SCRAPINGBEE_API_KEY;
+        if (!apiKey) {
+            console.log('⚠️ SCRAPINGBEE_API_KEY not set, skipping ScrapingBee');
+            return null;
+        }
+
+        try {
+            console.log('Trying ScrapingBee API...');
+            const axios = await import('axios');
+            
+            // ScrapingBee API endpoint
+            const apiUrl = 'https://app.scrapingbee.com/api/v1/';
+            const params = new URLSearchParams({
+                'api_key': apiKey,
+                'url': url,
+                'render_js': 'true', // Выполняет JavaScript на странице
+                'premium_proxy': 'true', // Использует премиум прокси для обхода блокировок
+                'country_code': 'us', // Страна прокси
+            });
+
+            const response = await axios.default.get(apiUrl, {
+                params: params,
+                timeout: 30000, // 30 секунд таймаут
+            });
+
+            if (response.data) {
+                console.log('✓ ScrapingBee successfully fetched content');
+                return typeof response.data === 'string' ? response.data : response.data.toString();
+            }
+            return null;
+        } catch (error: any) {
+            console.log(`⚠️ ScrapingBee API error: ${error.message}`);
+            return null;
+        }
+    }
+
+    /**
+     * Извлекает транскрипт из HTML страницы YouTube
+     */
+    private async extractTranscriptFromHTML(html: string, url: string): Promise<string | null> {
+        try {
+            const cheerio = await import('cheerio');
+            const $ = cheerio.load(html);
+            
+            // Ищем транскрипт в различных местах страницы
+            // YouTube хранит транскрипт в JSON данных страницы
+            const scripts = $('script').toArray();
+            
+            for (const script of scripts) {
+                const scriptContent = $(script).html() || '';
+                
+                // Ищем ytInitialPlayerResponse или ytInitialData
+                if (scriptContent.includes('ytInitialPlayerResponse') || scriptContent.includes('captionTracks')) {
+                    try {
+                        // Извлекаем JSON данные
+                        const match = scriptContent.match(/var ytInitialPlayerResponse = ({.+?});/);
+                        if (match) {
+                            const data = JSON.parse(match[1]);
+                            const captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+                            
+                            if (captionTracks && captionTracks.length > 0) {
+                                // Берем первый доступный трек (обычно это оригинальный язык)
+                                const captionUrl = captionTracks[0].baseUrl;
+                                
+                                if (captionUrl) {
+                                    // Загружаем транскрипт по URL
+                                    const axios = await import('axios');
+                                    const transcriptResponse = await axios.default.get(captionUrl);
+                                    
+                                    // Парсим XML транскрипта
+                                    const transcriptXml = transcriptResponse.data;
+                                    const transcriptItems: string[] = [];
+                                    
+                                    const transcriptMatches = transcriptXml.matchAll(/<text[^>]*>([^<]+)<\/text>/g);
+                                    for (const match of transcriptMatches) {
+                                        transcriptItems.push(match[1].trim());
+                                    }
+                                    
+                                    if (transcriptItems.length > 0) {
+                                        return transcriptItems.join(' ');
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // Продолжаем поиск в других скриптах
+                        continue;
+                    }
+                }
+            }
+            
+            return null;
+        } catch (error: any) {
+            console.log(`⚠️ Failed to extract transcript from HTML: ${error.message}`);
+            return null;
+        }
     }
 
     private async getYouTubeTranscript(url: string): Promise<string> {
