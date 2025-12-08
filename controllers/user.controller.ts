@@ -20,77 +20,110 @@ class UserController {
     async register(req: Request, res: Response): Promise<void> {
         try {
             const userData: CreateUserDTO = req.body;
+            
+            // Валидация входных данных
+            if (!userData.email || !userData.password || !userData.name) {
+                res.status(400).json({ message: 'Все поля обязательны для заполнения' });
+                return;
+            }
+            
+            // Проверка формата email
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(userData.email)) {
+                res.status(400).json({ message: 'Неверный формат email' });
+                return;
+            }
+            
             const newUser = await UserService.createUser(userData);
-            res.status(201).json(newUser);
-        } catch (error) {
-            res.status(500).json({ message: 'Error registering new user', error });
+            
+            // Генерируем токен для нового пользователя
+            const token = jwt.sign({ userId: newUser.id }, JWT_SECRET, { expiresIn: '7d' });
+            
+            res.status(201).json({ 
+                user: {
+                    id: newUser.id,
+                    name: newUser.name,
+                    email: newUser.email
+                },
+                token 
+            });
+        } catch (error: any) {
+            console.error('Registration error:', error);
+            
+            // Обработка ошибки дубликата email
+            if (error.message && error.message.includes('уже существует')) {
+                res.status(409).json({ message: error.message });
+                return;
+            }
+            
+            // Обработка ошибки Sequelize unique constraint
+            if (error.name === 'SequelizeUniqueConstraintError') {
+                res.status(409).json({ message: 'Пользователь с таким email уже существует. Используйте другой email или войдите в существующий аккаунт.' });
+                return;
+            }
+            
+            res.status(500).json({ message: 'Ошибка при регистрации пользователя', error: error.message || 'Неизвестная ошибка' });
         }
     }
 
-    async login(req: Request, res: Response): Promise<void> {
+    async login(req: Request, res: Response): Promise<Response | void> {
         try {
             const credentials: LoginUserDTO = req.body;
             const token = await UserService.loginUser(credentials);
 
             if (!token) {
-                res.status(401).json({ message: 'Invalid email or password' });
-                return;
+                return res.status(401).json({ message: 'Invalid email or password' });
             }
 
-            res.status(200).json({ token });
+            return res.status(200).json({ token });
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
 
-    async getProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async getProfile(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const user = await UserService.getUserById(userId);
             if (!user) {
-                res.status(404).json({ message: 'User not found' });
-                return;
+                return res.status(404).json({ message: 'User not found' });
             }
-            res.status(200).json(user);
+            return res.status(200).json(user);
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
 
-    async getInterests(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async getInterests(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const interests = await UserService.getInterests(userId);
-            res.status(200).json(interests);
+            return res.status(200).json(interests);
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
 
-    async updateInterests(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async updateInterests(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const { interests } = req.body;
             if (!Array.isArray(interests)) {
-                res.status(400).json({ message: 'Interests must be an array of strings or objects with {interest, level}' });
-                return;
+                return res.status(400).json({ message: 'Interests must be an array of strings or objects with {interest, level}' });
             }
             const updatedInterests = await UserService.updateInterests(userId, interests);
-            res.status(200).json(updatedInterests);
+            return res.status(200).json(updatedInterests);
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
     
@@ -99,65 +132,59 @@ class UserController {
      * POST /api/auth/interests/add
      * Body: { interest: "танцы", level?: "novice" }
      */
-    async addInterest(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async addInterest(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const { interest, level } = req.body;
             if (!interest || typeof interest !== 'string') {
-                res.status(400).json({ message: 'Interest is required and must be a string' });
-                return;
+                return res.status(400).json({ message: 'Interest is required and must be a string' });
             }
             
             const validLevels = ['novice', 'amateur', 'professional'];
             if (level && !validLevels.includes(level)) {
-                res.status(400).json({ message: `Level must be one of: ${validLevels.join(', ')}` });
-                return;
+                return res.status(400).json({ message: `Level must be one of: ${validLevels.join(', ')}` });
             }
             
             const result = await UserService.addInterest(userId, interest, level);
-            res.status(200).json({
+            return res.status(200).json({
                 interest: result.interest,
                 level: result.level || null,
             });
         } catch (error: any) {
-            res.status(500).json({ message: 'Server error', error: error.message });
+            return res.status(500).json({ message: 'Server error', error: error.message });
         }
     }
 
-    async getActiveInterests(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async getActiveInterests(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const activeInterests = await UserService.getActiveInterests(userId);
-            res.status(200).json(activeInterests);
+            return res.status(200).json(activeInterests);
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
 
-    async setActiveInterests(req: AuthenticatedRequest, res: Response): Promise<void> {
+    async setActiveInterests(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
         try {
             const userId = req.user?.userId;
             if (!userId) {
-                res.status(401).json({ message: 'Unauthorized' });
-                return;
+                return res.status(401).json({ message: 'Unauthorized' });
             }
             const { interestIds } = req.body;
             if (!Array.isArray(interestIds)) {
-                res.status(400).json({ message: 'interestIds must be an array of numbers' });
-                return;
+                return res.status(400).json({ message: 'interestIds must be an array of numbers' });
             }
             await UserService.setActiveInterests(userId, interestIds);
-            res.status(200).json({ message: 'Active interests updated' });
+            return res.status(200).json({ message: 'Active interests updated' });
         } catch (error) {
-            res.status(500).json({ message: 'Server error', error });
+            return res.status(500).json({ message: 'Server error', error });
         }
     }
 }

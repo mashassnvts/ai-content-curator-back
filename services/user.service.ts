@@ -14,14 +14,28 @@ const JWT_SECRET = process.env.JWT_SECRET as string;
 class UserService {
     async createUser(userData: { name: string, email: string, password: string }): Promise<User> {
         const { name, email, password } = userData;
+        
+        // Нормализуем email (приводим к нижнему регистру и убираем пробелы)
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        // Проверяем, существует ли уже пользователь с таким email
+        const existingUser = await User.findOne({ where: { email: normalizedEmail } });
+        if (existingUser) {
+            throw new Error('Пользователь с таким email уже существует. Используйте другой email или войдите в существующий аккаунт.');
+        }
+        
         const password_hash = await bcrypt.hash(password, 10);
-        const newUser = await User.create({ name, email, password_hash });
+        const newUser = await User.create({ name, email: normalizedEmail, password_hash });
         return newUser;
     }
 
     async loginUser(credentials: { email: string, password: string }): Promise<string | null> {
         const { email, password } = credentials;
-        const user = await User.findOne({ where: { email } });
+        
+        // Нормализуем email (приводим к нижнему регистру и убираем пробелы)
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        const user = await User.findOne({ where: { email: normalizedEmail } });
 
         if (!user || !(await bcrypt.compare(password, user.password_hash))) {
             return null;
