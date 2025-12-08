@@ -216,9 +216,7 @@ class ContentService {
             console.warn(`⚠️ All content extraction methods failed for ${videoPlatform}. Returning minimal metadata.`);
             return {
                 content: `⚠️ ВАЖНО: Не удалось извлечь полный контент из видео. Браузер недоступен на этом сервере, или видео требует аутентификации. Анализ будет проведен только на основе URL и доступных метаданных.\n\nURL: ${url}\nПлатформа: ${videoPlatform}`,
-                sourceType: 'metadata',
-                title: '',
-                description: ''
+                sourceType: 'metadata' as const
             };
         } else {
             // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
@@ -324,9 +322,7 @@ class ContentService {
                 console.warn(`⚠️ All content extraction methods failed. Returning minimal metadata.`);
                 return {
                     content: `⚠️ ВАЖНО: Не удалось извлечь полный контент из статьи. Браузер недоступен на этом сервере. Анализ будет проведен только на основе URL и доступных метаданных.\n\nURL: ${url}`,
-                    sourceType: 'metadata',
-                    title: '',
-                    description: ''
+                    sourceType: 'metadata' as const
                 };
             }
         }
@@ -1388,13 +1384,20 @@ class ContentService {
         // Сначала пробуем простой HTTP-запрос (не требует браузера)
         try {
             console.log(`Extracting basic metadata via HTTP fetch from: ${url}`);
+            
+            // Используем AbortController для таймаута
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            
             const response = await fetch(url, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
                 },
-                timeout: 10000
+                signal: controller.signal
             });
+            
+            clearTimeout(timeoutId);
             
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
@@ -1422,7 +1425,11 @@ class ContentService {
                 return { content, sourceType: 'metadata' };
             }
         } catch (httpError: any) {
-            console.warn(`⚠️ HTTP metadata extraction failed: ${httpError.message}`);
+            if (httpError.name === 'AbortError') {
+                console.warn(`⚠️ HTTP metadata extraction timed out after 10 seconds`);
+            } else {
+                console.warn(`⚠️ HTTP metadata extraction failed: ${httpError.message}`);
+            }
             console.log(`   Trying Puppeteer fallback...`);
         }
         
