@@ -22,115 +22,102 @@ class ContentService {
         if (videoPlatform) {
             console.log(`Processing ${videoPlatform} video: ${url}`);
             
-            // 1. Приоритет для YouTube: Встроенный транскрипт (быстро и полно)
+            // ============================================
+            // ПРИОРИТЕТ 1: ПОЛУЧЕНИЕ ТРАНСКРИПТА ВИДЕО
+            // ============================================
+            // Для всех видео сначала пытаемся получить полную расшифровку (транскрипт)
+            // Только если ВСЕ методы получения транскрипта провалились, используем метаданные
+            
             if (videoPlatform === 'youtube') {
+                console.log('🎬 [YouTube] Attempting to extract video transcript (full content)...');
+                
+                // Метод 1: Библиотека youtube-transcript (самый быстрый, не требует браузер)
                 try {
-                    // Сначала пробуем библиотеку youtube-transcript (не требует браузер)
-                    try {
-                        const { YoutubeTranscript } = await import('youtube-transcript');
-                        const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
-                        const transcriptText = transcriptItems.map(item => item.text).join(' ');
-                        
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓ Using youtube-transcript library (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
-                        }
-                    } catch (youtubeTranscriptError: any) {
-                        console.log(`⚠️ youtube-transcript library failed: ${youtubeTranscriptError.message}`);
-                        console.log(`   Trying ScrapingBee fallback...`);
-                    }
+                    console.log('   [1/3] Trying youtube-transcript library...');
+                    const { YoutubeTranscript } = await import('youtube-transcript');
+                    const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+                    const transcriptText = transcriptItems.map(item => item.text).join(' ');
                     
-                    // Fallback 1: ScrapingBee API (не требует браузеров)
-                    try {
-                        console.log('🔍 Attempting ScrapingBee for transcript extraction...');
-                        const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                        if (scrapingBeeContent) {
-                            console.log(`✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
-                            // Пытаемся извлечь транскрипт из HTML через ScrapingBee
-                            const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
-                            if (transcriptText && transcriptText.trim().length > 50) {
-                                console.log(`✓ Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
-                                return { content: transcriptText, sourceType: 'transcript' };
-                            } else {
-                                console.log(`⚠️ ScrapingBee HTML received but transcript not found in HTML`);
-                            }
-                        } else {
-                            console.log(`⚠️ ScrapingBee returned empty content`);
-                        }
-                    } catch (scrapingBeeError: any) {
-                        console.log(`⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
-                        console.log(`   Trying Puppeteer fallback...`);
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
                     }
-                    
-                    // Fallback 2: Puppeteer (только если предыдущие методы не сработали)
-                    // Добавляем общий таймаут на получение транскрипта (45 секунд)
-                    try {
-                        const transcriptText = await Promise.race([
-                            this.getYouTubeTranscript(url),
-                            new Promise<string>((_, reject) => 
-                                setTimeout(() => reject(new Error('Transcript extraction timeout')), 45000)
-                            )
-                        ]);
-                        
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓ Using YouTube transcript (Puppeteer) for analysis (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
-                        }
-                    } catch (puppeteerError: any) {
-                        const errorMsg = puppeteerError.message || 'Unknown error';
-                        console.warn(`⚠️ YouTube transcript extraction failed: ${errorMsg}`);
-                        console.warn(`   Proceeding to metadata fallback...`);
-                    }
-                } catch (error: any) {
-                    const errorMsg = error.message || 'Unknown error';
-                    console.warn(`⚠️ YouTube transcript extraction failed: ${errorMsg}`);
-                    console.warn(`   Proceeding to metadata fallback...`);
+                } catch (youtubeTranscriptError: any) {
+                    console.log(`   ⚠️ youtube-transcript failed: ${youtubeTranscriptError.message}`);
                 }
                 
-                // Если нативный транскрипт YouTube не найден, переходим к метаданным.
-                console.log('YouTube native transcript not found. Proceeding to metadata fallback...');
+                // Метод 2: ScrapingBee API для получения HTML и извлечения транскрипта
+                try {
+                    console.log('   [2/3] Trying ScrapingBee API for transcript...');
+                    const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                    if (scrapingBeeContent) {
+                        console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
+                        const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
+                        }
+                    }
+                } catch (scrapingBeeError: any) {
+                    console.log(`   ⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
+                }
+                
+                // Метод 3: Puppeteer (открывает браузер и извлекает транскрипт со страницы)
+                try {
+                    console.log('   [3/3] Trying Puppeteer (browser-based) for transcript...');
+                    const transcriptText = await Promise.race([
+                        this.getYouTubeTranscript(url),
+                        new Promise<string>((_, reject) => 
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 45000)
+                        )
+                    ]);
+                    
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
+                    }
+                } catch (puppeteerError: any) {
+                    const errorMsg = puppeteerError.message || 'Unknown error';
+                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
+                }
+                
+                // Все методы получения транскрипта провалились
+                console.log('❌ All transcript extraction methods failed for YouTube. Proceeding to metadata fallback...');
             }
 
-            // --- БЛОК ДЛЯ НЕ-YOUTUBE ИЛИ YOUTUBE БЕЗ ТРАНСКРИПТА ---
-
-            // Транскрипция включена по умолчанию для всех платформ (кроме YouTube, который использует нативный транскрипт)
-            // Отключается только если явно указано DISABLE_VIDEO_TRANSCRIPTION=true
+            // Для не-YouTube платформ: попытка автоматической транскрибации
+            // Транскрипция включена по умолчанию, отключается только если DISABLE_VIDEO_TRANSCRIPTION=true
             const disableTranscription = process.env.DISABLE_VIDEO_TRANSCRIPTION === 'true';
 
-            // 2. Попытка автоматической транскрибации для не-YouTube платформ
-            // Это позволяет получить полное содержание видео через транскрипцию аудио
             if (!disableTranscription && videoPlatform !== 'youtube') {
-                console.log(`🎬 Attempting automatic transcription for ${videoPlatform} video to get full content...`);
-                console.log(`   URL: ${url}`);
-                console.log(`   Platform: ${videoPlatform}`);
+                console.log(`🎬 [${videoPlatform}] Attempting automatic transcription to get full video content...`);
                 try {
-                    // Используем отдельный метод для транскрибации
                     const transcribedText = await this.transcribeVideo(url, videoPlatform);
                     if (transcribedText && transcribedText.trim().length > 50) {
-                        console.log(`✓ Using automatic transcription for analysis (${transcribedText.length} chars) - full video content extracted`);
+                        console.log(`✓✓✓ SUCCESS: Using automatic transcription (${transcribedText.length} chars) - full video content extracted`);
                         return { content: transcribedText, sourceType: 'transcript' };
                     } else {
-                        console.warn(`⚠️ Transcription returned empty or too short text for ${videoPlatform} (${transcribedText?.length || 0} chars)`);
+                        console.warn(`⚠️ Transcription returned empty or too short text (${transcribedText?.length || 0} chars)`);
                     }
                 } catch (error: any) {
                     const errorMsg = error.message || 'Unknown error';
                     console.warn(`⚠️ Automatic transcription failed for ${videoPlatform}: ${errorMsg}`);
-                    console.warn(`   Error stack: ${error.stack || 'No stack trace'}`);
                     if (errorMsg.includes('download') || errorMsg.includes('Failed to download')) {
-                        console.warn(`   → Video download failed. This may happen if: video is private, platform is not supported by yt-dlp, or network issues.`);
+                        console.warn(`   → Video download failed. May be private or unsupported.`);
                     } else if (errorMsg.includes('extract') || errorMsg.includes('audio')) {
                         console.warn(`   → Audio extraction failed.`);
                     } else if (errorMsg.includes('Transcription failed') || errorMsg.includes('Whisper')) {
                         console.warn(`   → Transcription service failed.`);
                     }
-                    // Fallthrough to metadata extraction
                 }
             } else if (disableTranscription && videoPlatform !== 'youtube') {
-                console.log(`⏭️ Video transcription disabled via DISABLE_VIDEO_TRANSCRIPTION. Using metadata only.`);
-            } else if (videoPlatform === 'youtube') {
-                // Это сообщение уже выводилось выше, но для ясности:
-                console.log('Skipping automatic transcription for YouTube (using native transcript only if available).');
+                console.log(`⏭️ Video transcription disabled. Using metadata only.`);
             }
+
+            // ============================================
+            // ПРИОРИТЕТ 2: МЕТАДАННЫЕ (только если транскрипт недоступен)
+            // ============================================
+            console.log(`📋 [${videoPlatform}] Transcript unavailable. Falling back to metadata extraction...`);
 
 
             // 3. ПРИОРИТЕТНЫЙ FALLBACK: Метаданные через yt-dlp (самый быстрый и надежный способ получить название/описание)
