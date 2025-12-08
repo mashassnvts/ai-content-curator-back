@@ -86,6 +86,20 @@ export const addFeedback = async (req: AuthenticatedRequest, res: Response) => {
         res.status(201).json(feedback);
     } catch (error: any) {
         console.error('Error adding feedback:', error);
+        console.error('Error stack:', error.stack);
+        
+        // Убеждаемся, что CORS заголовки установлены даже при ошибке
+        const origin = req.headers.origin;
+        if (origin) {
+            res.setHeader('Access-Control-Allow-Origin', origin);
+            res.setHeader('Access-Control-Allow-Credentials', 'true');
+        }
+        
+        // Если ошибка связана с БД, возвращаем более информативное сообщение
+        if (error.name === 'SequelizeDatabaseError' || error.name === 'SequelizeConnectionError') {
+            return res.status(503).json({ message: 'Database temporarily unavailable. Please try again later.', error: 'Database error' });
+        }
+        
         res.status(500).json({ message: 'Failed to add feedback.', error: error.message });
     }
 };

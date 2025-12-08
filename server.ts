@@ -22,15 +22,40 @@ const app: Application = express();
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
+// Получаем список разрешенных origin из переменной окружения
+const allowedOrigins = process.env.CORS_ORIGIN 
+    ? process.env.CORS_ORIGIN.split(',').map((origin: string) => origin.trim())
+    : ['http://localhost:3000', 'http://127.0.0.1:3000'];
+
+console.log('🌐 CORS allowed origins:', allowedOrigins);
+
 const corsOptions = {
-    origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map((origin: string) => origin.trim()) : ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // Разрешаем запросы без origin (например, мобильные приложения, Postman)
+        if (!origin) {
+            return callback(null, true);
+        }
+        
+        // Проверяем, есть ли origin в списке разрешенных
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn(`⚠️ CORS blocked origin: ${origin}`);
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
     credentials: true, // Разрешаем отправку cookies
     optionsSuccessStatus: 200, // Для старых браузеров
+    preflightContinue: false,
 };
 
 app.use(cors(corsOptions));
+
+// Явная обработка OPTIONS запросов для всех маршрутов
+app.options('*', cors(corsOptions));
+
 app.use(express.json()); // Ensure JSON bodies are parsed
 
 // Remove urlencoded parser if it exists, to avoid conflicts
@@ -53,9 +78,16 @@ app.use((err: any, req: Request, res: Response, next: any) => {
     
     // Убеждаемся, что CORS заголовки установлены даже при ошибке
     const origin = req.headers.origin;
-    if (origin && corsOptions.origin.includes(origin)) {
+    if (origin && allowedOrigins.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    }
+    
+    // Если это CORS ошибка, возвращаем 403
+    if (err.message === 'Not allowed by CORS') {
+        return res.status(403).json({ message: 'CORS policy violation', error: err.message });
     }
     
     res.status(500).json({ message: 'Internal server error', error: err.message });
