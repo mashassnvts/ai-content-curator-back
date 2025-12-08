@@ -52,10 +52,6 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-
-// Явная обработка OPTIONS запросов для всех маршрутов
-app.options('*', cors(corsOptions));
-
 app.use(express.json()); // Ensure JSON bodies are parsed
 
 // Remove urlencoded parser if it exists, to avoid conflicts
