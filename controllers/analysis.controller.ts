@@ -18,26 +18,42 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
 
         // Проверяем, не является ли контент сообщением об ошибке
-        const errorIndicators = [
-            'Failed to scrape',
-            'Failed to extract',
-            'Could not find',
-            'Chrome not found',
-            'Cannot find module',
-            'Error:',
-            'error:',
-            'Exception:',
-            'exception:',
-            'Не удалось извлечь',
-            'не удалось извлечь'
-        ];
+        // НО: пропускаем метаданные с предупреждениями (они все равно содержат полезную информацию)
+        const isMetadataWithWarning = sourceType === 'metadata' && content.includes('⚠️ ВАЖНО');
         
-        const isErrorMessage = errorIndicators.some(indicator => 
-            content.toLowerCase().includes(indicator.toLowerCase())
-        );
+        // Для метаданных с предупреждениями разрешаем даже короткий контент (минимум 20 символов)
+        const minLength = isMetadataWithWarning ? 20 : 50;
         
-        if (isErrorMessage || content.trim().length < 50) {
-            throw new Error(`Не удалось извлечь контент из URL. ${content.substring(0, 200)}`);
+        // Проверяем на ошибки только если это НЕ метаданные с предупреждением
+        if (!isMetadataWithWarning) {
+            const errorIndicators = [
+                'Failed to scrape',
+                'Failed to extract',
+                'Could not find',
+                'Chrome not found',
+                'Cannot find module',
+                'Error:',
+                'error:',
+                'Exception:',
+                'exception:',
+            ];
+            
+            // Исключаем проверку на "Не удалось извлечь", так как это может быть частью предупреждения в метаданных
+            const isErrorMessage = errorIndicators.some(indicator => 
+                content.toLowerCase().includes(indicator.toLowerCase())
+            );
+            
+            if (isErrorMessage || content.trim().length < minLength) {
+                throw new Error(`Не удалось извлечь контент из URL. ${content.substring(0, 200)}`);
+            }
+        } else {
+            // Если это метаданные с предупреждением, логируем это, но продолжаем анализ
+            console.log(`⚠️ Using metadata with warning for analysis (content length: ${content.length} chars)`);
+            
+            // Проверяем минимальную длину даже для метаданных
+            if (content.trim().length < minLength) {
+                throw new Error(`Не удалось извлечь достаточно информации из URL. ${content.substring(0, 200)}`);
+            }
         }
 
         const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url);
