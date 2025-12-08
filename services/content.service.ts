@@ -212,8 +212,14 @@ class ContentService {
                 console.warn(`⚠️ Basic metadata extraction failed: ${error.message}`);
             }
             
-            // Если даже базовые метаданные не получены, возвращаем минимальную информацию
-            throw new Error(`Не удалось извлечь контент из видео с платформы ${videoPlatform}. Возможно, видео приватно или недоступно.`);
+            // Если даже базовые метаданные не получены, возвращаем минимальную информацию вместо ошибки
+            console.warn(`⚠️ All content extraction methods failed for ${videoPlatform}. Returning minimal metadata.`);
+            return {
+                content: `⚠️ ВАЖНО: Не удалось извлечь полный контент из видео. Браузер недоступен на этом сервере, или видео требует аутентификации. Анализ будет проведен только на основе URL и доступных метаданных.\n\nURL: ${url}\nПлатформа: ${videoPlatform}`,
+                sourceType: 'metadata',
+                title: '',
+                description: ''
+            };
         } else {
             // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
             // Сначала пробуем ScrapingBee (не требует браузеров)
@@ -302,8 +308,26 @@ class ContentService {
                     }
                 }
                 
-                // Если ничего не получилось, выбрасываем понятную ошибку
-                throw new Error(`Не удалось извлечь контент из статьи. ${errorMsg.includes('Chrome') ? 'Браузер недоступен на этом сервере.' : errorMsg}`);
+                // ФИНАЛЬНЫЙ FALLBACK: Пытаемся извлечь хотя бы базовые метаданные
+                try {
+                    console.log(`🔄 Attempting final fallback: extracting basic metadata from article...`);
+                    const basicMetadata = await this.extractBasicMetadata(url);
+                    if (basicMetadata && basicMetadata.content && basicMetadata.content.trim().length > 20) {
+                        console.log(`✓ Using basic metadata as last resort for article`);
+                        return basicMetadata;
+                    }
+                } catch (metadataError: any) {
+                    console.warn(`⚠️ Final metadata fallback failed: ${metadataError.message}`);
+                }
+                
+                // Если даже базовые метаданные не получены, возвращаем минимальную информацию вместо ошибки
+                console.warn(`⚠️ All content extraction methods failed. Returning minimal metadata.`);
+                return {
+                    content: `⚠️ ВАЖНО: Не удалось извлечь полный контент из статьи. Браузер недоступен на этом сервере. Анализ будет проведен только на основе URL и доступных метаданных.\n\nURL: ${url}`,
+                    sourceType: 'metadata',
+                    title: '',
+                    description: ''
+                };
             }
         }
     }
@@ -439,7 +463,20 @@ class ContentService {
             }
             return null;
         } catch (error: any) {
-            console.log(`⚠️ ScrapingBee API error: ${error.message}`);
+            const status = error.response?.status;
+            const statusText = error.response?.statusText;
+            
+            // Обрабатываем разные типы ошибок
+            if (status === 401 || status === 403) {
+                console.log(`⚠️ ScrapingBee API authentication error (${status}): Invalid API key or access denied`);
+            } else if (status === 429) {
+                console.log(`⚠️ ScrapingBee API rate limit exceeded (429): Too many requests`);
+            } else if (status >= 500) {
+                console.log(`⚠️ ScrapingBee API server error (${status}): ${statusText || error.message}`);
+            } else {
+                console.log(`⚠️ ScrapingBee API error: ${error.message || 'Unknown error'}`);
+            }
+            
             return null;
         }
     }
@@ -1344,13 +1381,55 @@ class ContentService {
     }
 
     /**
-     * Финальный fallback: извлекает базовые метаданные (og:title, og:description) через легкий Puppeteer-запрос
-     * Используется только если все остальные методы провалились
+     * Финальный fallback: извлекает базовые метаданные (og:title, og:description) 
+     * Сначала пробует простой HTTP-запрос (без браузера), потом Puppeteer
      */
     private async extractBasicMetadata(url: string): Promise<ExtractedContent | null> {
+        // Сначала пробуем простой HTTP-запрос (не требует браузера)
+        try {
+            console.log(`Extracting basic metadata via HTTP fetch from: ${url}`);
+            const response = await fetch(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                },
+                timeout: 10000
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            
+            const html = await response.text();
+            
+            // Извлекаем og:tags и title из HTML через regex
+            const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+            const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+            const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+            
+            const title = ogTitleMatch?.[1] || titleMatch?.[1] || '';
+            const description = ogDescMatch?.[1] || '';
+            
+            if (title || description) {
+                const contentParts: string[] = [];
+                if (title) contentParts.push(`Название: ${title}`);
+                if (description) contentParts.push(`\n\nОписание: ${description}`);
+                
+                const content = contentParts.join('') + 
+                    '\n\n⚠️ ВАЖНО: Это только базовые метаданные (og:tags). Полный контент недоступен без браузера.';
+                
+                console.log(`✓ Extracted basic metadata via HTTP (title: ${title ? 'yes' : 'no'}, desc: ${description ? 'yes' : 'no'})`);
+                return { content, sourceType: 'metadata' };
+            }
+        } catch (httpError: any) {
+            console.warn(`⚠️ HTTP metadata extraction failed: ${httpError.message}`);
+            console.log(`   Trying Puppeteer fallback...`);
+        }
+        
+        // Fallback на Puppeteer (если HTTP не сработал)
         let browser = null;
         try {
-            console.log(`Extracting basic metadata (og:tags) from: ${url}`);
+            console.log(`Extracting basic metadata via Puppeteer from: ${url}`);
             const launchOptions = await this.getPuppeteerLaunchOptions();
             browser = await puppeteer.launch(launchOptions);
             const page = await browser.newPage();
@@ -1386,14 +1465,14 @@ class ContentService {
                 const content = contentParts.join('') + 
                     '\n\n⚠️ ВАЖНО: Это только базовые метаданные (og:tags). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных, без доступа к полному содержанию видео.';
 
-                console.log(`✓ Extracted basic metadata (title: ${metadata.title ? 'yes' : 'no'}, desc: ${metadata.description ? 'yes' : 'no'})`);
+                console.log(`✓ Extracted basic metadata via Puppeteer (title: ${metadata.title ? 'yes' : 'no'}, desc: ${metadata.description ? 'yes' : 'no'})`);
                 return { content, sourceType: 'metadata' };
             }
 
             return null;
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.warn(`⚠️ Basic metadata extraction failed: ${errorMessage}`);
+            console.warn(`⚠️ Puppeteer metadata extraction failed: ${errorMessage}`);
             return null;
         } finally {
             if (browser) {
