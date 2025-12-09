@@ -35,15 +35,43 @@ class ContentService {
                 try {
                     console.log('   [1/3] Trying youtube-transcript library...');
                     const { YoutubeTranscript } = await import('youtube-transcript');
-                    const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
-                    const transcriptText = transcriptItems.map(item => item.text).join(' ');
                     
-                    if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${transcriptText.length} chars)`);
-                        return { content: transcriptText, sourceType: 'transcript' };
+                    // Пробуем сначала без указания языка (автоматический выбор)
+                    try {
+                        const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+                        const transcriptText = transcriptItems.map(item => item.text).join(' ');
+                        
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
+                        }
+                    } catch (autoError: any) {
+                        // Если автоматический выбор не сработал, пробуем с конкретными языками
+                        const languages = ['ru', 'en', 'uk'];
+                        for (const lang of languages) {
+                            try {
+                                console.log(`   Trying youtube-transcript with language: ${lang}...`);
+                                const transcriptItems = await YoutubeTranscript.fetchTranscript(url, { lang });
+                                const transcriptText = transcriptItems.map(item => item.text).join(' ');
+                                
+                                if (transcriptText && transcriptText.trim().length > 50) {
+                                    console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${lang}, ${transcriptText.length} chars)`);
+                                    return { content: transcriptText, sourceType: 'transcript' };
+                                }
+                            } catch (langError: any) {
+                                // Пробуем следующий язык
+                                continue;
+                            }
+                        }
+                        throw autoError; // Если все языки провалились, пробрасываем исходную ошибку
                     }
                 } catch (youtubeTranscriptError: any) {
-                    console.log(`   ⚠️ youtube-transcript failed: ${youtubeTranscriptError.message}`);
+                    const errorMsg = youtubeTranscriptError.message || 'Unknown error';
+                    if (errorMsg.includes('captcha') || errorMsg.includes('too many requests')) {
+                        console.log(`   ⚠️ youtube-transcript failed: YouTube requires captcha or rate limited`);
+                    } else {
+                        console.log(`   ⚠️ youtube-transcript failed: ${errorMsg}`);
+                    }
                 }
                 
                 // Метод 2: ScrapingBee API для получения HTML и извлечения транскрипта
@@ -222,9 +250,9 @@ class ContentService {
                         if (element.length > 0) {
                             mainEl = element;
                             break;
-                        }
-                    }
-                    
+        }
+    }
+
                     if (mainEl && mainEl.length > 0) {
                         // Удаляем ненужные элементы
                         mainEl.find('script, style, nav, header, footer, aside, form, button, .comments, #comments').remove();
@@ -319,22 +347,22 @@ class ContentService {
      * Вспомогательная функция для получения настроек запуска Puppeteer с автоматическим поиском Chrome
      */
     private async getPuppeteerLaunchOptions(additionalArgs: string[] = []): Promise<any> {
-        const launchOptions: any = {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--lang=ru-RU,ru',
-                '--disable-features=TranslateUI',
+            const launchOptions: any = {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--lang=ru-RU,ru',
+                    '--disable-features=TranslateUI',
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 ...additionalArgs
-            ]
-        };
+                ]
+            };
         
-        // Используем системный Chromium, если указан путь
-        if (process.env.PUPPETEER_EXECUTABLE_PATH) {
-            launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+            // Используем системный Chromium, если указан путь
+            if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+                launchOptions.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
             console.log('Using system Chrome/Chromium from PUPPETEER_EXECUTABLE_PATH');
             return launchOptions;
         }
@@ -365,38 +393,72 @@ class ContentService {
         // Если не нашли, пытаемся использовать Chrome, установленный через Puppeteer
         if (!foundPath) {
             try {
-                const puppeteerCore = await import('puppeteer-core');
-                const puppeteerPath = puppeteerCore.executablePath();
+                // Используем сам puppeteer для получения пути к Chrome
+                const puppeteerModule = await import('puppeteer');
+                // @ts-ignore - executablePath может быть доступен через внутренний API
+                const puppeteerPath = (puppeteerModule as any).executablePath?.() || 
+                                     (puppeteerModule as any).default?.executablePath?.();
                 if (puppeteerPath && fsModule.existsSync(puppeteerPath)) {
                     foundPath = puppeteerPath;
-                    console.log(`Found Puppeteer-installed Chrome at: ${foundPath}`);
+                    console.log(`✓ Found Puppeteer-installed Chrome at: ${foundPath}`);
                 }
             } catch (e) {
-                // Игнорируем ошибки
+                console.log(`⚠️ Could not get Chrome path from Puppeteer: ${e instanceof Error ? e.message : 'Unknown error'}`);
             }
         }
         
-        // Проверяем путь к кэшу Puppeteer (для Render.com)
+        // Проверяем путь к кэшу Puppeteer (для Render.com и других платформ)
         if (!foundPath) {
-            const cachePath = process.env.PUPPETEER_CACHE_DIR || 
-                             (process.env.HOME ? `${process.env.HOME}/.cache/puppeteer` : null) ||
-                             '/opt/render/.cache/puppeteer';
-            try {
-                if (fsModule.existsSync(cachePath)) {
-                    const chromeDirs = fsModule.readdirSync(cachePath).filter((dir: string) => 
-                        dir.startsWith('chrome') || dir.startsWith('chromium')
-                    );
-                    for (const dir of chromeDirs) {
-                        const chromePath = `${cachePath}/${dir}/chrome-linux64/chrome`;
-                        if (fsModule.existsSync(chromePath)) {
-                            foundPath = chromePath;
-                            console.log(`Found Chrome in Puppeteer cache at: ${foundPath}`);
-                            break;
+            const possibleCachePaths = [
+                process.env.PUPPETEER_CACHE_DIR,
+                process.env.HOME ? `${process.env.HOME}/.cache/puppeteer` : null,
+                '/opt/render/.cache/puppeteer',
+                '/root/.cache/puppeteer',
+                os.homedir() + '/.cache/puppeteer'
+            ].filter(Boolean) as string[];
+            
+            for (const cachePath of possibleCachePaths) {
+                try {
+                    if (fsModule.existsSync(cachePath)) {
+                        console.log(`🔍 Checking Puppeteer cache at: ${cachePath}`);
+                        const entries = fsModule.readdirSync(cachePath);
+                        console.log(`   Found ${entries.length} entries in cache`);
+                        
+                        // Ищем директории с Chrome
+                        const chromeDirs = entries.filter((dir: string) => 
+                            dir.startsWith('chrome') || dir.startsWith('chromium')
+                        );
+                        
+                        console.log(`   Found ${chromeDirs.length} Chrome directories: ${chromeDirs.join(', ')}`);
+                        
+                        for (const dir of chromeDirs) {
+                            // Пробуем разные возможные структуры
+                            const possibleChromePaths = [
+                                `${cachePath}/${dir}/chrome-linux64/chrome`,
+                                `${cachePath}/${dir}/chrome-linux/chrome`,
+                                `${cachePath}/${dir}/chrome/chrome`,
+                                `${cachePath}/${dir}/chrome`,
+                                `${cachePath}/${dir}/chromium`,
+                            ];
+                            
+                            for (const chromePath of possibleChromePaths) {
+                                if (fsModule.existsSync(chromePath)) {
+                                    // Проверяем, что это исполняемый файл
+                                    const stats = fsModule.statSync(chromePath);
+                                    if (stats.isFile()) {
+                                        foundPath = chromePath;
+                                        console.log(`✓ Found Chrome in Puppeteer cache at: ${foundPath}`);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (foundPath) break;
                         }
                     }
+                } catch (e) {
+                    console.log(`⚠️ Error checking cache path ${cachePath}: ${e instanceof Error ? e.message : 'Unknown error'}`);
                 }
-            } catch (e) {
-                // Игнорируем ошибки
+                if (foundPath) break;
             }
         }
         
@@ -478,20 +540,25 @@ class ContentService {
                 return null;
             }
 
-            // Метод 1: Ищем транскрипт в JSON данных страницы
+            console.log(`🔍 Searching for transcript in HTML for video: ${videoId}`);
+
+            // Метод 1: Ищем транскрипт в JSON данных страницы (ytInitialPlayerResponse)
             const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
+            console.log(`   Found ${scripts.length} script tags to search`);
             
             for (const scriptTag of scripts) {
                 const scriptContent = scriptTag.replace(/<\/?script[^>]*>/gi, '');
                 
                 // Ищем ytInitialPlayerResponse
                 if (scriptContent.includes('ytInitialPlayerResponse')) {
+                    console.log('   Found ytInitialPlayerResponse, parsing...');
                     try {
                         // Пробуем разные паттерны для извлечения JSON
                         const patterns = [
-                            /var ytInitialPlayerResponse = ([\s\S]+?);/,
-                            /"ytInitialPlayerResponse"\s*:\s*([\s\S]+?)(?=;|$)/,
-                            /ytInitialPlayerResponse\s*=\s*([\s\S]+?);/
+                            /var ytInitialPlayerResponse\s*=\s*({[\s\S]+?});/,
+                            /"ytInitialPlayerResponse"\s*:\s*({[\s\S]+?})(?=;|$)/,
+                            /ytInitialPlayerResponse\s*=\s*({[\s\S]+?});/,
+                            /ytInitialPlayerResponse\s*=\s*({[\s\S]+?})(?=;|<\/script>|$)/m
                         ];
                         
                         for (const pattern of patterns) {
@@ -502,22 +569,33 @@ class ContentService {
                                     let jsonStr = match[1].trim();
                                     // Убираем завершающие точки с запятой или другие символы
                                     jsonStr = jsonStr.replace(/;[\s]*$/, '');
+                                    // Убираем возможные завершающие скобки после JSON
+                                    if (jsonStr.endsWith('})')) {
+                                        jsonStr = jsonStr.slice(0, -1);
+                                    }
                                     
                                     const data = JSON.parse(jsonStr);
                                     
                                     // Ищем captionTracks в разных местах структуры
                                     let captionTracks = null;
-                                    if (data?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
-                                        captionTracks = data.captions.playerCaptionsTracklistRenderer.captionTracks;
-                                    } else if (data?.captions?.playerCaptionsRenderer?.captionTracks) {
-                                        captionTracks = data.captions.playerCaptionsRenderer.captionTracks;
-                                    } else if (data?.videoDetails?.captionTracks) {
-                                        captionTracks = data.videoDetails.captionTracks;
-                                    } else if (data?.captionTracks) {
-                                        captionTracks = data.captionTracks;
+                                    const searchPaths = [
+                                        () => data?.captions?.playerCaptionsTracklistRenderer?.captionTracks,
+                                        () => data?.captions?.playerCaptionsRenderer?.captionTracks,
+                                        () => data?.videoDetails?.captionTracks,
+                                        () => data?.captionTracks,
+                                        () => data?.captions?.captionTracks,
+                                        () => data?.playerCaptionsTracklistRenderer?.captionTracks
+                                    ];
+                                    
+                                    for (const path of searchPaths) {
+                                        captionTracks = path();
+                                        if (captionTracks && Array.isArray(captionTracks) && captionTracks.length > 0) {
+                                            break;
+                                        }
                                     }
                                     
                                     if (captionTracks && Array.isArray(captionTracks) && captionTracks.length > 0) {
+                                        console.log(`   Found ${captionTracks.length} caption tracks`);
                                         // Ищем русский или английский трек, или берем первый доступный
                                         let captionTrack = captionTracks.find((track: any) => 
                                             (track.languageCode === 'ru' || track.languageCode === 'en') && 
@@ -528,7 +606,7 @@ class ContentService {
                                             const captionUrl = captionTrack.baseUrl || captionTrack.url;
                                             
                                             if (captionUrl) {
-                                                console.log(`Found caption track: ${captionTrack.languageCode || 'unknown'}`);
+                                                console.log(`✓ Found caption track: ${captionTrack.languageCode || 'unknown'}`);
                                                 const transcript = await this.downloadTranscriptFromUrl(captionUrl);
                                                 if (transcript) {
                                                     return transcript;
@@ -538,51 +616,87 @@ class ContentService {
                                     }
                                 } catch (parseError: any) {
                                     // Пробуем следующий паттерн или ищем другим способом
-                                    if (!parseError.message.includes('Unexpected token')) {
-                                        console.log(`JSON parse error: ${parseError.message.substring(0, 100)}`);
+                                    if (!parseError.message.includes('Unexpected token') && !parseError.message.includes('JSON')) {
+                                        console.log(`   JSON parse error: ${parseError.message.substring(0, 100)}`);
                                     }
                                     continue;
                                 }
                             }
                         }
                         
-                        // Альтернативный метод: ищем captionTracks напрямую в тексте
+                        // Альтернативный метод: ищем captionTracks напрямую в тексте через regex
                         if (scriptContent.includes('captionTracks')) {
+                            console.log('   Trying alternative regex method for captionTracks...');
                             try {
-                                // Ищем массив captionTracks
-                                const captionTracksMatch = scriptContent.match(/captionTracks["\s]*:[\s]*\[([^\]]+)\]/);
-                                if (captionTracksMatch) {
-                                    // Ищем baseUrl в найденном фрагменте
-                                    const baseUrlMatch = captionTracksMatch[1].match(/baseUrl["\s]*:["\s]*"([^"]+)"/);
-                                    if (baseUrlMatch && baseUrlMatch[1]) {
-                                        console.log('Found caption URL via alternative method');
-                                        const transcript = await this.downloadTranscriptFromUrl(baseUrlMatch[1]);
-                                        if (transcript) {
-                                            return transcript;
+                                // Более гибкий поиск baseUrl
+                                const baseUrlPatterns = [
+                                    /"baseUrl"\s*:\s*"([^"]+)"/,
+                                    /baseUrl["\s]*:["\s]*"([^"]+)"/,
+                                    /"url"\s*:\s*"([^"]+timedtext[^"]+)"/,
+                                    /captionTracks[^[]*\[[^\]]*"baseUrl"[^"]*"([^"]+)"/,
+                                ];
+                                
+                                for (const pattern of baseUrlPatterns) {
+                                    const matches = scriptContent.matchAll(new RegExp(pattern.source, 'g'));
+                                    for (const match of matches) {
+                                        if (match[1] && match[1].includes('timedtext')) {
+                                            console.log(`✓ Found caption URL via regex: ${match[1].substring(0, 100)}...`);
+                                            const transcript = await this.downloadTranscriptFromUrl(match[1]);
+                                            if (transcript) {
+                                                return transcript;
+                                            }
                                         }
                                     }
                                 }
                             } catch (e) {
-                                // Игнорируем ошибки альтернативного метода
+                                console.log(`   Regex method failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
                             }
                         }
                     } catch (e) {
-                        // Продолжаем поиск
+                        console.log(`   Error processing script: ${e instanceof Error ? e.message : 'Unknown error'}`);
                         continue;
                     }
                 }
             }
             
-            // Метод 2: Прямой запрос к YouTube API для получения транскрипта
+            // Метод 2: Прямой поиск URL транскрипта в HTML через regex
+            console.log('   Trying direct URL search in HTML...');
+            try {
+                const directUrlPatterns = [
+                    /"baseUrl"\s*:\s*"([^"]+timedtext[^"]+)"/g,
+                    /baseUrl["\s]*:["\s]*"([^"]+timedtext[^"]+)"/g,
+                    /captionTracks[^[]*\[[^\]]*"baseUrl"[^"]*"([^"]+timedtext[^"]+)"/g,
+                ];
+                
+                for (const pattern of directUrlPatterns) {
+                    const matches = html.matchAll(pattern);
+                    for (const match of matches) {
+                        if (match[1] && match[1].includes('timedtext')) {
+                            console.log(`✓ Found transcript URL directly in HTML`);
+                            const transcript = await this.downloadTranscriptFromUrl(match[1]);
+                            if (transcript) {
+                                return transcript;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log(`   Direct URL search failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+            }
+            
+            // Метод 3: Прямой запрос к YouTube API для получения транскрипта
+            console.log('   Trying YouTube API method...');
             try {
                 const transcriptUrl = await this.getYouTubeTranscriptUrl(videoId);
                 if (transcriptUrl) {
+                    console.log(`✓ Got transcript URL from API`);
                     return await this.downloadTranscriptFromUrl(transcriptUrl);
                 }
             } catch (e) {
-                console.log(`⚠️ Direct transcript URL fetch failed: ${e}`);
+                console.log(`   YouTube API method failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
             }
             
+            console.log('❌ No transcript found in HTML');
             return null;
         } catch (error: any) {
             console.log(`⚠️ Failed to extract transcript from HTML: ${error.message}`);
@@ -638,31 +752,78 @@ class ContentService {
      */
     private async getYouTubeTranscriptUrl(videoId: string): Promise<string | null> {
         try {
-            // Пробуем получить информацию о видео через YouTube Data API или через парсинг страницы
             const axios = await import('axios');
             
-            // Пробуем получить страницу видео с параметром для включения транскрипта
+            // Пробуем получить страницу видео
             const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
             const response = await axios.default.get(videoUrl, {
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
                 },
-                timeout: 15000
+                timeout: 15000,
+                maxRedirects: 5
             });
             
             const html = response.data;
             const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
             
+            // Ищем в скриптах с ytInitialPlayerResponse
             for (const scriptTag of scripts) {
                 const scriptContent = scriptTag.replace(/<\/?script[^>]*>/gi, '');
+                
+                if (scriptContent.includes('ytInitialPlayerResponse')) {
+                    try {
+                        // Пробуем извлечь JSON
+                        const patterns = [
+                            /var ytInitialPlayerResponse\s*=\s*({[\s\S]+?});/,
+                            /ytInitialPlayerResponse\s*=\s*({[\s\S]+?})(?=;|<\/script>|$)/m
+                        ];
+                        
+                        for (const pattern of patterns) {
+                            const match = scriptContent.match(pattern);
+                            if (match && match[1]) {
+                                try {
+                                    let jsonStr = match[1].trim().replace(/;[\s]*$/, '');
+                                    const data = JSON.parse(jsonStr);
+                                    
+                                    // Ищем captionTracks
+                                    const captionTracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
+                                                         data?.captions?.playerCaptionsRenderer?.captionTracks ||
+                                                         data?.videoDetails?.captionTracks ||
+                                                         data?.captionTracks;
+                                    
+                                    if (captionTracks && Array.isArray(captionTracks) && captionTracks.length > 0) {
+                                        const track = captionTracks.find((t: any) => 
+                                            (t.languageCode === 'ru' || t.languageCode === 'en') && (t.baseUrl || t.url)
+                                        ) || captionTracks.find((t: any) => t.baseUrl || t.url);
+                                        
+                                        if (track?.baseUrl || track?.url) {
+                                            return track.baseUrl || track.url;
+                                        }
+                                    }
+                                } catch (e) {
+                                    continue;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+                
+                // Альтернативный поиск через regex
                 if (scriptContent.includes('captionTracks')) {
-                    const match = scriptContent.match(/captionTracks["\s]*:[\s]*\[([^\]]+)\]/);
-                    if (match) {
-                        // Извлекаем URL из JSON
-                        const urlMatch = match[1].match(/baseUrl["\s]*:["\s]*"([^"]+)"/);
-                        if (urlMatch) {
-                            return urlMatch[1];
+                    const urlPatterns = [
+                        /"baseUrl"\s*:\s*"([^"]+timedtext[^"]+)"/,
+                        /baseUrl["\s]*:["\s]*"([^"]+timedtext[^"]+)"/,
+                    ];
+                    
+                    for (const pattern of urlPatterns) {
+                        const match = scriptContent.match(pattern);
+                        if (match && match[1] && match[1].includes('timedtext')) {
+                            return match[1];
                         }
                     }
                 }
