@@ -643,7 +643,7 @@ class ContentService {
                                             if (captionUrl) {
                                                 // Декодируем Unicode escape sequences в URL
                                                 try {
-                                                    captionUrl = captionUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => {
+                                                    captionUrl = captionUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match: string, hex: string) => {
                                                         return String.fromCharCode(parseInt(hex, 16));
                                                     });
                                                 } catch (e) {
@@ -687,7 +687,7 @@ class ContentService {
                                                 // Декодируем Unicode escape sequences в URL
                                                 let decodedUrl = match[1];
                                                 try {
-                                                    decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                                    decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m: string, hex: string) => {
                                                         return String.fromCharCode(parseInt(hex, 16));
                                                     });
                                                 } catch (e) {
@@ -729,7 +729,7 @@ class ContentService {
                             // Декодируем Unicode escape sequences в URL
                             let decodedUrl = match[1];
                             try {
-                                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m: string, hex: string) => {
                                     return String.fromCharCode(parseInt(hex, 16));
                                 });
                             } catch (e) {
@@ -777,7 +777,7 @@ class ContentService {
             let decodedUrl = captionUrl;
             try {
                 // Заменяем Unicode escape sequences
-                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => {
+                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match: string, hex: string) => {
                     return String.fromCharCode(parseInt(hex, 16));
                 });
                 // Также декодируем стандартные escape sequences
@@ -888,7 +888,7 @@ class ContentService {
                                             let transcriptUrl = track.baseUrl || track.url;
                                             // Декодируем Unicode escape sequences
                                             try {
-                                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m: string, hex: string) => {
                                                     return String.fromCharCode(parseInt(hex, 16));
                                                 });
                                             } catch (e) {
@@ -920,7 +920,7 @@ class ContentService {
                             let transcriptUrl = match[1];
                             // Декодируем Unicode escape sequences
                             try {
-                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m: string, hex: string) => {
                                     return String.fromCharCode(parseInt(hex, 16));
                                 });
                             } catch (e) {
