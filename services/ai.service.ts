@@ -376,8 +376,9 @@ ${feedbackContext}
         
         console.log('Sending request to Gemini API...');
         
-        // Список моделей для fallback при ошибке 503 (модель перегружена)
-        const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+        // Список моделей для fallback при ошибке 503 (модель перегружена) или 404 (модель не найдена)
+        // gemini-1.5-pro может быть недоступна в некоторых API версиях, поэтому используем gemini-pro как fallback
+        const fallbackModels = ['gemini-2.5-flash', 'gemini-pro'];
         const currentModelIndex = fallbackModels.indexOf(aiModel);
         const modelsToTry = currentModelIndex >= 0 
             ? fallbackModels.slice(currentModelIndex) 
@@ -399,27 +400,49 @@ ${feedbackContext}
                 const errorMessage = String(error.message || error || JSON.stringify(error));
                 const errorCode = error.code || error.status || error.statusCode || '';
                 
-                // Если это 503 (модель перегружена) и есть еще модели для попытки - пробуем следующую
+                // Если это 503 (модель перегружена) или 404 (модель не найдена) - пробуем следующую модель
                 const isOverloaded = errorMessage.includes('503') || 
                                     errorMessage.includes('overloaded') || 
                                     errorMessage.includes('UNAVAILABLE') ||
                                     errorCode === 503;
                 
+                const isModelNotFound = errorMessage.includes('404') || 
+                                       errorMessage.includes('not found') || 
+                                       errorMessage.includes('NOT_FOUND') ||
+                                       errorCode === 404 ||
+                                       (errorMessage.includes('is not found') && errorMessage.includes('API version'));
+                
                 const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
                                        errorMessage.includes('quota exceeded') ||
                                        errorMessage.includes('daily quota');
                 
-                // Если квота исчерпана или это не ошибка перегрузки - не пробуем другие модели
-                if (isQuotaExceeded || !isOverloaded) {
+                // Если квота исчерпана - не пробуем другие модели
+                if (isQuotaExceeded) {
                     throw error;
                 }
                 
-                // Если это последняя модель в списке - выбрасываем ошибку
-                if (modelsToTry.indexOf(modelToTry) === modelsToTry.length - 1) {
-                    throw error;
+                // Если модель не найдена (404) или перегружена (503) - пробуем следующую модель
+                if (isModelNotFound || isOverloaded) {
+                    // Если это последняя модель в списке - выбрасываем ошибку
+                    if (modelsToTry.indexOf(modelToTry) === modelsToTry.length - 1) {
+                        if (isModelNotFound) {
+                            console.error(`❌ Model ${modelToTry} is not found (404). All fallback models exhausted.`);
+                        } else {
+                            console.error(`❌ Model ${modelToTry} is overloaded (503). All fallback models exhausted.`);
+                        }
+                        throw error;
+                    }
+                    
+                    if (isModelNotFound) {
+                        console.log(`⚠️ Model ${modelToTry} is not found (404). Trying next fallback model...`);
+                    } else {
+                        console.log(`⚠️ Model ${modelToTry} is overloaded (503). Trying next fallback model...`);
+                    }
+                    continue; // Пробуем следующую модель
                 }
                 
-                console.log(`⚠️ Model ${modelToTry} is overloaded (503). Trying next fallback model...`);
+                // Для других ошибок - выбрасываем сразу
+                throw error;
             }
         }
         
