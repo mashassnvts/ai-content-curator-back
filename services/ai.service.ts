@@ -61,21 +61,40 @@ async function generateCompletionWithRetry(
             return completion;
         } catch (error: any) {
             lastError = error;
-            const errorMessage = String(error.message || error || JSON.stringify(error));
-            const errorCode = error.code || error.status || error.statusCode || '';
+            // Извлекаем сообщение об ошибке из разных мест ответа
+            const errorResponse = error.response || error.error || error;
+            const errorMessage = String(
+                errorResponse?.error?.message || 
+                errorResponse?.message || 
+                error.message || 
+                error || 
+                JSON.stringify(error)
+            );
+            const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
             
-            // Retry на таймауты, 429 (rate limit - можно повторить)
-            // НЕ retry на 503 (overloaded) - лучше попробовать другую модель
+            // Проверка на ошибку API ключа (400) - сразу выбрасываем, не retry
+            const isApiKeyError = errorMessage.includes('API Key not found') || 
+                                 errorMessage.includes('API_KEY_INVALID') ||
+                                 errorMessage.includes('API key') ||
+                                 (errorCode === 400 && (errorMessage.includes('API') || errorMessage.includes('key')));
+            
+            if (isApiKeyError) {
+                // Ошибка API ключа - не retry, сразу выбрасываем
+                throw error;
+            }
+            
+            // Retry на таймауты, 429 (rate limit), 503 (overloaded) - можно повторить с задержкой
             // НЕ retry на QUOTA_EXCEEDED (дневной лимит исчерпан)
             const isOverloaded = errorMessage.includes('overloaded') || 
                                 errorMessage.includes('UNAVAILABLE') ||
-                                (errorCode === 503 && errorMessage.includes('overloaded'));
+                                errorCode === 503;
             
             const isRetryable = errorMessage.includes('429') || 
                                errorMessage.includes('timed out') ||
                                (errorMessage.includes('RESOURCE_EXHAUSTED') && !errorMessage.includes('QUOTA_EXCEEDED')) ||
-                               (errorCode === 503 && !isOverloaded) || // 503 без "overloaded" - можно повторить
-                               errorCode === 429;
+                               isOverloaded || // 503 (overloaded) - делаем retry с задержкой
+                               errorCode === 429 ||
+                               errorCode === 503;
             
             const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
                                    errorMessage.includes('quota exceeded') ||
@@ -83,9 +102,6 @@ async function generateCompletionWithRetry(
             
             if (isQuotaExceeded) {
                 // Дневной лимит исчерпан - не retry
-                throw error;
-            } else if (isOverloaded) {
-                // Модель перегружена - не retry, пробуем другую модель
                 throw error;
             } else if (isRetryable) {
                 console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage}). Retrying in ${delay / 1000}s...`);
@@ -377,8 +393,10 @@ ${feedbackContext}
         console.log('Sending request to Gemini API...');
         
         // Список моделей для fallback при ошибке 503 (модель перегружена) или 404 (модель не найдена)
-        // gemini-1.5-pro может быть недоступна в некоторых API версиях, поэтому используем gemini-pro как fallback
-        const fallbackModels = ['gemini-2.5-flash', 'gemini-pro'];
+        // gemini-pro не поддерживается в API v1beta, поэтому используем только gemini-2.5-flash
+        // Если gemini-2.5-flash перегружен, просто ждем и повторяем запрос (retry уже есть в generateCompletionWithRetry)
+        // НЕ используем gemini-pro, так как он недоступен в v1beta API
+        const fallbackModels: string[] = []; // Пустой список - не переключаемся на другие модели
         const currentModelIndex = fallbackModels.indexOf(aiModel);
         const modelsToTry = currentModelIndex >= 0 
             ? fallbackModels.slice(currentModelIndex) 
@@ -397,8 +415,27 @@ ${feedbackContext}
                 break; // Успешно получили ответ
             } catch (error: any) {
                 lastError = error;
-                const errorMessage = String(error.message || error || JSON.stringify(error));
-                const errorCode = error.code || error.status || error.statusCode || '';
+                // Извлекаем сообщение об ошибке из разных мест ответа
+                const errorResponse = error.response || error.error || error;
+                const errorMessage = String(
+                    errorResponse?.error?.message || 
+                    errorResponse?.message || 
+                    error.message || 
+                    error || 
+                    JSON.stringify(error)
+                );
+                const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
+                
+                // Проверка на ошибку API ключа (400) - сразу выбрасываем, не пробуем другие модели
+                const isApiKeyError = errorMessage.includes('API Key not found') || 
+                                     errorMessage.includes('API_KEY_INVALID') ||
+                                     errorMessage.includes('API key') ||
+                                     (errorCode === 400 && (errorMessage.includes('API') || errorMessage.includes('key')));
+                
+                if (isApiKeyError) {
+                    console.error(`❌ API Key error (400): ${errorMessage}`);
+                    throw error; // Сразу выбрасываем, не пробуем другие модели
+                }
                 
                 // Если это 503 (модель перегружена) или 404 (модель не найдена) - пробуем следующую модель
                 const isOverloaded = errorMessage.includes('503') || 
@@ -406,11 +443,12 @@ ${feedbackContext}
                                     errorMessage.includes('UNAVAILABLE') ||
                                     errorCode === 503;
                 
-                const isModelNotFound = errorMessage.includes('404') || 
+                const isModelNotFound = (errorMessage.includes('404') || 
                                        errorMessage.includes('not found') || 
                                        errorMessage.includes('NOT_FOUND') ||
                                        errorCode === 404 ||
-                                       (errorMessage.includes('is not found') && errorMessage.includes('API version'));
+                                       (errorMessage.includes('is not found') && errorMessage.includes('API version'))) &&
+                                       !isApiKeyError; // Не считаем ошибкой API ключа
                 
                 const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
                                        errorMessage.includes('quota exceeded') ||
@@ -609,8 +647,41 @@ ${feedbackContext}
         if (error.statusCode) console.error(`Error statusCode: ${error.statusCode}`);
         if (error.response) console.error(`Error response:`, JSON.stringify(error.response, null, 2));
         
-        // Обработка ошибки недоступной модели (404, 400)
-        if (error.message && (error.message.includes('404') || error.message.includes('400') || error.message.includes('not found') || error.message.includes('not a valid model') || error.message.includes('INVALID_ARGUMENT'))) {
+        // Извлекаем сообщение об ошибке из разных мест ответа
+        const errorResponse = error.response || error.error || error;
+        const errorMessage = String(
+            errorResponse?.error?.message || 
+            errorResponse?.message || 
+            error.message || 
+            error || 
+            JSON.stringify(error)
+        );
+        const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
+        
+        // Обработка ошибки API ключа (400) - отдельная обработка
+        const isApiKeyError = errorMessage.includes('API Key not found') || 
+                             errorMessage.includes('API_KEY_INVALID') ||
+                             errorMessage.includes('API key') ||
+                             (errorCode === 400 && (errorMessage.includes('API') || errorMessage.includes('key')));
+        
+        if (isApiKeyError) {
+            console.error(`❌ API Key error: ${errorMessage}`);
+            console.error('');
+            console.error('💡 This project uses Google Gemini API (FREE).');
+            console.error('   The API key is missing or invalid.');
+            console.error('');
+            console.error('📝 To fix this:');
+            console.error('   1. Get your FREE API key at: https://aistudio.google.com/app/apikey');
+            console.error('   2. Add to your .env file: GEMINI_API_KEY=your_key_here');
+            console.error('   3. Make sure the API key is correct and not expired');
+            console.error('   4. Restart your server');
+            throw new Error(`API ключ не найден или неверен. Получите API ключ на https://aistudio.google.com/app/apikey и добавьте его в .env файл как GEMINI_API_KEY=your_key_here`);
+        }
+        
+        // Обработка ошибки недоступной модели (404, 400 без ошибки API ключа)
+        if (errorMessage.includes('404') || 
+            (errorCode === 404) ||
+            (errorCode === 400 && !isApiKeyError && (errorMessage.includes('not found') || errorMessage.includes('not a valid model') || errorMessage.includes('INVALID_ARGUMENT')))) {
             console.error(`❌ Model "${aiModel}" is not available or has invalid name!`);
             console.error('');
             console.error('💡 This project uses Google Gemini API (FREE).');
@@ -627,7 +698,7 @@ ${feedbackContext}
             console.error('   2. Add to your .env file: GEMINI_API_KEY=your_key_here');
             console.error('   3. Set AI_MODEL=gemini-2.5-flash (or gemini-1.5-pro)');
             console.error('   4. Restart your server');
-            throw new Error(`Модель "${aiModel}" недоступна. Используйте gemini-2.5-flash или gemini-1.5-pro (gemini-3-pro недоступна в бесплатном тарифе). Получите API ключ на https://aistudio.google.com/app/apikey`);
+            throw new Error(`Модель "${aiModel}" недоступна. Используйте gemini-2.5-flash или gemini-1.5-pro. Получите API ключ на https://aistudio.google.com/app/apikey`);
         }
         
         // Обработка ошибки rate limit (слишком много запросов в минуту)
