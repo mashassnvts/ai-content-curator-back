@@ -477,53 +477,88 @@ class ContentService {
      * Извлекает HTML контент через ScrapingBee API (не требует браузеров)
      */
     private async extractWithScrapingBee(url: string): Promise<string | null> {
-        const apiKey = process.env.SCRAPINGBEE_API_KEY;
-        if (!apiKey) {
-            console.log('⚠️ SCRAPINGBEE_API_KEY not set, skipping ScrapingBee');
+        // Поддержка нескольких API ключей через переменную окружения (разделенные запятыми)
+        const apiKeysEnv = process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS;
+        if (!apiKeysEnv) {
+            console.log('⚠️ SCRAPINGBEE_API_KEY or SCRAPINGBEE_API_KEYS not set, skipping ScrapingBee');
             return null;
         }
 
-        try {
-            console.log('Trying ScrapingBee API...');
-            const axios = await import('axios');
-            
-            // ScrapingBee API endpoint
-            const apiUrl = 'https://app.scrapingbee.com/api/v1/';
-            const params = new URLSearchParams({
-                'api_key': apiKey,
-                'url': url,
-                'render_js': 'true', // Выполняет JavaScript на странице
-                'premium_proxy': 'true', // Использует премиум прокси для обхода блокировок
-                'country_code': 'us', // Страна прокси
-            });
-
-            const response = await axios.default.get(apiUrl, {
-                params: params,
-                timeout: 30000, // 30 секунд таймаут
-            });
-
-            if (response.data) {
-                console.log('✓ ScrapingBee successfully fetched content');
-                return typeof response.data === 'string' ? response.data : response.data.toString();
-            }
-            return null;
-        } catch (error: any) {
-            const status = error.response?.status;
-            const statusText = error.response?.statusText;
-            
-            // Обрабатываем разные типы ошибок
-            if (status === 401 || status === 403) {
-                console.log(`⚠️ ScrapingBee API authentication error (${status}): Invalid API key or access denied`);
-            } else if (status === 429) {
-                console.log(`⚠️ ScrapingBee API rate limit exceeded (429): Too many requests`);
-            } else if (status >= 500) {
-                console.log(`⚠️ ScrapingBee API server error (${status}): ${statusText || error.message}`);
-            } else {
-                console.log(`⚠️ ScrapingBee API error: ${error.message || 'Unknown error'}`);
-            }
-            
+        // Разбиваем ключи по запятым и очищаем от пробелов
+        const apiKeys = apiKeysEnv.split(',').map(key => key.trim()).filter(key => key.length > 0);
+        
+        if (apiKeys.length === 0) {
+            console.log('⚠️ No valid ScrapingBee API keys found');
             return null;
         }
+
+        const axios = await import('axios');
+        const apiUrl = 'https://app.scrapingbee.com/api/v1/';
+
+        // Пробуем каждый ключ по очереди
+        for (let i = 0; i < apiKeys.length; i++) {
+            const apiKey = apiKeys[i];
+            const isLastKey = i === apiKeys.length - 1;
+            
+            try {
+                if (apiKeys.length > 1) {
+                    console.log(`Trying ScrapingBee API (key ${i + 1}/${apiKeys.length})...`);
+                } else {
+                    console.log('Trying ScrapingBee API...');
+                }
+                
+                const params = new URLSearchParams({
+                    'api_key': apiKey,
+                    'url': url,
+                    'render_js': 'true', // Выполняет JavaScript на странице
+                    'premium_proxy': 'true', // Использует премиум прокси для обхода блокировок
+                    'country_code': 'us', // Страна прокси
+                });
+
+                const response = await axios.default.get(apiUrl, {
+                    params: params,
+                    timeout: 30000, // 30 секунд таймаут
+                });
+
+                if (response.data) {
+                    console.log('✓ ScrapingBee successfully fetched content');
+                    return typeof response.data === 'string' ? response.data : response.data.toString();
+                }
+            } catch (error: any) {
+                const status = error.response?.status;
+                const statusText = error.response?.statusText;
+                
+                // Обрабатываем разные типы ошибок
+                if (status === 401 || status === 403) {
+                    console.log(`⚠️ ScrapingBee API authentication error (${status}) for key ${i + 1}: Invalid API key or access denied`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else if (status === 429) {
+                    console.log(`⚠️ ScrapingBee API rate limit exceeded (429) for key ${i + 1}: Too many requests`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else if (status >= 500) {
+                    console.log(`⚠️ ScrapingBee API server error (${status}) for key ${i + 1}: ${statusText || error.message}`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else {
+                    console.log(`⚠️ ScrapingBee API error for key ${i + 1}: ${error.message || 'Unknown error'}`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                }
+            }
+        }
+        
+        console.log(`❌ All ScrapingBee API keys failed`);
+        return null;
     }
 
     /**
@@ -603,9 +638,18 @@ class ContentService {
                                         ) || captionTracks.find((track: any) => track.baseUrl || track.url);
                                         
                                         if (captionTrack) {
-                                            const captionUrl = captionTrack.baseUrl || captionTrack.url;
+                                            let captionUrl = captionTrack.baseUrl || captionTrack.url;
                                             
                                             if (captionUrl) {
+                                                // Декодируем Unicode escape sequences в URL
+                                                try {
+                                                    captionUrl = captionUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => {
+                                                        return String.fromCharCode(parseInt(hex, 16));
+                                                    });
+                                                } catch (e) {
+                                                    // Если декодирование не удалось, используем исходный URL
+                                                }
+                                                
                                                 console.log(`✓ Found caption track: ${captionTrack.languageCode || 'unknown'}`);
                                                 const transcript = await this.downloadTranscriptFromUrl(captionUrl);
                                                 if (transcript) {
@@ -636,18 +680,28 @@ class ContentService {
                                     /captionTracks[^[]*\[[^\]]*"baseUrl"[^"]*"([^"]+)"/,
                                 ];
                                 
-                                for (const pattern of baseUrlPatterns) {
-                                    const matches = scriptContent.matchAll(new RegExp(pattern.source, 'g'));
-                                    for (const match of matches) {
-                                        if (match[1] && match[1].includes('timedtext')) {
-                                            console.log(`✓ Found caption URL via regex: ${match[1].substring(0, 100)}...`);
-                                            const transcript = await this.downloadTranscriptFromUrl(match[1]);
-                                            if (transcript) {
-                                                return transcript;
+                                    for (const pattern of baseUrlPatterns) {
+                                        const matches = scriptContent.matchAll(new RegExp(pattern.source, 'g'));
+                                        for (const match of matches) {
+                                            if (match[1] && match[1].includes('timedtext')) {
+                                                // Декодируем Unicode escape sequences в URL
+                                                let decodedUrl = match[1];
+                                                try {
+                                                    decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                                        return String.fromCharCode(parseInt(hex, 16));
+                                                    });
+                                                } catch (e) {
+                                                    // Если декодирование не удалось, используем исходный URL
+                                                }
+                                                
+                                                console.log(`✓ Found caption URL via regex: ${decodedUrl.substring(0, 100)}...`);
+                                                const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
+                                                if (transcript) {
+                                                    return transcript;
+                                                }
                                             }
                                         }
                                     }
-                                }
                             } catch (e) {
                                 console.log(`   Regex method failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
                             }
@@ -672,8 +726,18 @@ class ContentService {
                     const matches = html.matchAll(pattern);
                     for (const match of matches) {
                         if (match[1] && match[1].includes('timedtext')) {
+                            // Декодируем Unicode escape sequences в URL
+                            let decodedUrl = match[1];
+                            try {
+                                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                    return String.fromCharCode(parseInt(hex, 16));
+                                });
+                            } catch (e) {
+                                // Если декодирование не удалось, используем исходный URL
+                            }
+                            
                             console.log(`✓ Found transcript URL directly in HTML`);
-                            const transcript = await this.downloadTranscriptFromUrl(match[1]);
+                            const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
                             if (transcript) {
                                 return transcript;
                             }
@@ -709,11 +773,27 @@ class ContentService {
      */
     private async downloadTranscriptFromUrl(captionUrl: string): Promise<string | null> {
         try {
+            // Декодируем Unicode escape sequences в URL (например, \u0026 -> &)
+            let decodedUrl = captionUrl;
+            try {
+                // Заменяем Unicode escape sequences
+                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match, hex) => {
+                    return String.fromCharCode(parseInt(hex, 16));
+                });
+                // Также декодируем стандартные escape sequences
+                decodedUrl = decodeURIComponent(decodedUrl);
+            } catch (decodeError) {
+                // Если декодирование не удалось, используем исходный URL
+                console.log(`   Warning: Could not decode URL, using original`);
+            }
+            
             const axios = await import('axios');
-            const transcriptResponse = await axios.default.get(captionUrl, {
+            const transcriptResponse = await axios.default.get(decodedUrl, {
                 timeout: 10000,
                 headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/xml,application/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
                 }
             });
             
@@ -742,7 +822,12 @@ class ContentService {
             
             return null;
         } catch (error: any) {
-            console.log(`⚠️ Failed to download transcript from URL: ${error.message}`);
+            const status = error.response?.status;
+            if (status === 404) {
+                console.log(`⚠️ Transcript URL returned 404 (may be expired or invalid): ${captionUrl.substring(0, 100)}...`);
+            } else {
+                console.log(`⚠️ Failed to download transcript from URL: ${error.message}`);
+            }
             return null;
         }
     }
@@ -800,7 +885,16 @@ class ContentService {
                                         ) || captionTracks.find((t: any) => t.baseUrl || t.url);
                                         
                                         if (track?.baseUrl || track?.url) {
-                                            return track.baseUrl || track.url;
+                                            let transcriptUrl = track.baseUrl || track.url;
+                                            // Декодируем Unicode escape sequences
+                                            try {
+                                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                                    return String.fromCharCode(parseInt(hex, 16));
+                                                });
+                                            } catch (e) {
+                                                // Если декодирование не удалось, используем исходный URL
+                                            }
+                                            return transcriptUrl;
                                         }
                                     }
                                 } catch (e) {
@@ -823,7 +917,16 @@ class ContentService {
                     for (const pattern of urlPatterns) {
                         const match = scriptContent.match(pattern);
                         if (match && match[1] && match[1].includes('timedtext')) {
-                            return match[1];
+                            let transcriptUrl = match[1];
+                            // Декодируем Unicode escape sequences
+                            try {
+                                transcriptUrl = transcriptUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m, hex) => {
+                                    return String.fromCharCode(parseInt(hex, 16));
+                                });
+                            } catch (e) {
+                                // Если декодирование не удалось, используем исходный URL
+                            }
+                            return transcriptUrl;
                         }
                     }
                 }
