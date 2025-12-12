@@ -273,6 +273,41 @@ class BotUserService {
         }
     }
 
+    async updateInterestLevel(telegramId: string, interest: string, level: string): Promise<void> {
+        const profile = await this.getOrCreateProfile(telegramId);
+        const UserInterestLevel = (await import('../../models/UserInterestLevel')).default;
+        
+        const validLevels = ['novice', 'amateur', 'professional'];
+        if (!validLevels.includes(level)) {
+            throw new Error(`Invalid level: ${level}. Must be one of: ${validLevels.join(', ')}`);
+        }
+
+        if (profile.mode === 'linked' && profile.user_id) {
+            // Для linked пользователей обновляем через UserInterestLevel
+            const [userLevelRecord] = await UserInterestLevel.findOrCreate({
+                where: {
+                    userId: profile.user_id,
+                    interest: interest.toLowerCase().trim(),
+                },
+                defaults: {
+                    userId: profile.user_id,
+                    interest: interest.toLowerCase().trim(),
+                    level: level as 'novice' | 'amateur' | 'professional',
+                },
+            });
+            
+            if (userLevelRecord.level !== level) {
+                userLevelRecord.level = level as 'novice' | 'amateur' | 'professional';
+                await userLevelRecord.save();
+            }
+        } else {
+            // Для гостевых пользователей обновляем в JSON
+            const guestLevels = profile.guest_levels ? JSON.parse(profile.guest_levels) : {};
+            guestLevels[interest.toLowerCase()] = level;
+            await profile.update({ guest_levels: JSON.stringify(guestLevels) });
+        }
+    }
+
     async removeInterest(telegramId: string, interestIndex: number): Promise<void> {
         const profile = await this.getOrCreateProfile(telegramId);
 

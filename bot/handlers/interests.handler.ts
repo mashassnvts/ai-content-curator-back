@@ -4,6 +4,7 @@ import { MAIN_MENU_MARKUP, isMenuButton, filterMenuButtons } from '../utils/menu
 
 export const REMOVE_INTEREST_PREFIX = 'remove_interest_';
 export const TOGGLE_INTEREST_PREFIX = 'toggle_interest_';
+export const CHANGE_LEVEL_PREFIX = 'change_level_';
 
 export const showInterests = async (bot: TelegramBot, chatId: number, telegramId: string) => {
     const { interests, activeInterests, mode, levels } = await botUserService.getUserInterests(telegramId);
@@ -58,16 +59,24 @@ export const showInterests = async (bot: TelegramBot, chatId: number, telegramId
 
     await bot.sendMessage(
         chatId,
-        `📋 **Ваши интересы (${mode === 'linked' ? '🔗 синхронные' : '🙈 гостевые'}):**\n\n${interestsList}\n\n*Активных: ${activeCount} из ${totalCount}*\n\nНажмите на интерес, чтобы включить/выключить его.`,
+        `📋 **Ваши интересы (${mode === 'linked' ? '🔗 синхронные' : '🙈 гостевые'}):**\n\n${interestsList}\n\n*Активных: ${activeCount} из ${totalCount}*\n\nНажмите на интерес, чтобы включить/выключить его, или на 📊 чтобы изменить уровень.`,
         {
             parse_mode: 'Markdown',
             reply_markup: {
-                inline_keyboard: filteredInterests.map((interest, idx) => [
-                    {
-                        text: `${activeSet.has(interest) ? '✅' : '○'} ${interest}`,
-                        callback_data: `${TOGGLE_INTEREST_PREFIX}${idx}`
-                    }
-                ]).concat([
+                inline_keyboard: filteredInterests.map((interest, idx) => {
+                    const level = levels?.[interest.toLowerCase()];
+                    const levelEmoji = level === 'novice' ? '🟢' : level === 'amateur' ? '🟡' : level === 'professional' ? '🔴' : '⚪';
+                    return [
+                        {
+                            text: `${activeSet.has(interest) ? '✅' : '○'} ${interest}`,
+                            callback_data: `${TOGGLE_INTEREST_PREFIX}${idx}`
+                        },
+                        {
+                            text: `📊 ${levelEmoji} Уровень`,
+                            callback_data: `${CHANGE_LEVEL_PREFIX}${idx}`
+                        }
+                    ];
+                }).concat([
                     [{ text: '🗑 Удалить интерес', callback_data: 'show_remove_interests' }]
                 ])
             },
@@ -149,6 +158,60 @@ export const handleAddInterestInput = async (bot: TelegramBot, chatId: number, t
     await showInterests(bot, chatId, telegramId);
 };
 
+export const handleChangeInterestLevel = async (bot: TelegramBot, query: CallbackQuery, index: number) => {
+    const chatId = query.message?.chat.id;
+    const telegramId = query.from.id.toString();
+    
+    if (!chatId || Number.isNaN(index)) {
+        await bot.answerCallbackQuery(query.id);
+        return;
+    }
+
+    const { interests, levels } = await botUserService.getUserInterests(telegramId);
+    const filteredInterests = filterMenuButtons(interests);
+    
+    if (index < 0 || index >= filteredInterests.length) {
+        await bot.answerCallbackQuery(query.id, { text: 'Интерес не найден' });
+        return;
+    }
+
+    const interest = filteredInterests[index];
+    const currentLevel = levels?.[interest.toLowerCase()] || 'novice';
+    
+    const levelKeyboard = {
+        inline_keyboard: [
+            [
+                { 
+                    text: currentLevel === 'novice' ? '✅ 🟢 Новичок' : '🟢 Новичок', 
+                    callback_data: `${SET_LEVEL_PREFIX}${interest}|novice|change` 
+                },
+                { 
+                    text: currentLevel === 'amateur' ? '✅ 🟡 Любитель' : '🟡 Любитель', 
+                    callback_data: `${SET_LEVEL_PREFIX}${interest}|amateur|change` 
+                }
+            ],
+            [
+                { 
+                    text: currentLevel === 'professional' ? '✅ 🔴 Профессионал' : '🔴 Профессионал', 
+                    callback_data: `${SET_LEVEL_PREFIX}${interest}|professional|change` 
+                }
+            ]
+        ]
+    };
+    
+    await bot.answerCallbackQuery(query.id);
+    
+    await bot.sendMessage(
+        chatId,
+        `📊 Выберите ваш уровень в "${interest}":\n\n` +
+        `🟢 Новичок - только начинаю\n` +
+        `🟡 Любитель - есть базовые знания и опыт\n` +
+        `🔴 Профессионал - глубокие знания и опыт\n\n` +
+        `Текущий уровень: ${currentLevel === 'novice' ? '🟢 Новичок' : currentLevel === 'amateur' ? '🟡 Любитель' : '🔴 Профессионал'}`,
+        { reply_markup: levelKeyboard }
+    );
+};
+
 export const handleSetInterestLevelCallback = async (bot: TelegramBot, query: CallbackQuery, interest: string, level: string, skip?: boolean) => {
     const chatId = query.message?.chat.id;
     const telegramId = query.from.id.toString();
@@ -179,18 +242,38 @@ export const handleSetInterestLevelCallback = async (bot: TelegramBot, query: Ca
             'professional': '🔴 Профессионал'
         };
         
-        await bot.editMessageText(
-            `✅ Интерес "${interest}" добавлен!\n\n` +
-            `📊 Ваш уровень: ${levelNames[level] || level}\n` +
-            `Интерес автоматически включен.`,
-            {
-                chat_id: chatId,
-                message_id: query.message?.message_id,
-            }
-        ).catch(() => {
-            // Если не удалось отредактировать, отправляем новое сообщение
-            bot.sendMessage(chatId, `✅ Интерес "${interest}" добавлен с уровнем ${levelNames[level] || level}!`, { reply_markup: MAIN_MENU_MARKUP });
-        });
+        // Проверяем, это добавление нового интереса или изменение уровня существующего
+        // skip === true означает изменение уровня существующего интереса
+        const isChange = skip === true;
+        
+        if (isChange) {
+            // Обновляем уровень существующего интереса
+            await botUserService.updateInterestLevel(telegramId, interest, level);
+            
+            await bot.editMessageText(
+                `✅ Уровень для "${interest}" изменен!\n\n` +
+                `📊 Новый уровень: ${levelNames[level] || level}`,
+                {
+                    chat_id: chatId,
+                    message_id: query.message?.message_id,
+                }
+            ).catch(() => {
+                bot.sendMessage(chatId, `✅ Уровень для "${interest}" изменен на ${levelNames[level] || level}!`, { reply_markup: MAIN_MENU_MARKUP });
+            });
+        } else {
+            // Добавление нового интереса
+            await bot.editMessageText(
+                `✅ Интерес "${interest}" добавлен!\n\n` +
+                `📊 Ваш уровень: ${levelNames[level] || level}\n` +
+                `Интерес автоматически включен.`,
+                {
+                    chat_id: chatId,
+                    message_id: query.message?.message_id,
+                }
+            ).catch(() => {
+                bot.sendMessage(chatId, `✅ Интерес "${interest}" добавлен с уровнем ${levelNames[level] || level}!`, { reply_markup: MAIN_MENU_MARKUP });
+            });
+        }
 
         await showInterests(bot, chatId, telegramId);
     } catch (error: any) {
