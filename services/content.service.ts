@@ -31,9 +31,29 @@ class ContentService {
             if (videoPlatform === 'youtube') {
                 console.log('🎬 [YouTube] Attempting to extract video transcript (full content)...');
                 
-                // Метод 1: Библиотека youtube-transcript (самый быстрый, не требует браузер)
+                // Метод 1: Puppeteer (открывает браузер и извлекает транскрипт со страницы) - ПРИОРИТЕТНЫЙ
                 try {
-                    console.log('   [1/3] Trying youtube-transcript library...');
+                    console.log('   [1/4] Trying Puppeteer (browser-based) for transcript...');
+                    // Увеличиваем таймаут до 60 секунд для Puppeteer
+                    const transcriptText = await Promise.race([
+                        this.getYouTubeTranscript(url),
+                        new Promise<string>((_, reject) => 
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
+                        )
+                    ]);
+                    
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
+                    }
+                } catch (puppeteerError: any) {
+                    const errorMsg = puppeteerError.message || 'Unknown error';
+                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
+                }
+                
+                // Метод 2: Библиотека youtube-transcript (быстрый, не требует браузер)
+                try {
+                    console.log('   [2/4] Trying youtube-transcript library...');
                     const { YoutubeTranscript } = await import('youtube-transcript');
                     
                     // Пробуем сначала без указания языка (автоматический выбор)
@@ -74,9 +94,9 @@ class ContentService {
                     }
                 }
                 
-                // Метод 2: ScrapingBee API для получения HTML и извлечения транскрипта
+                // Метод 3: ScrapingBee API для получения HTML и извлечения транскрипта
                 try {
-                    console.log('   [2/3] Trying ScrapingBee API for transcript...');
+                    console.log('   [3/4] Trying ScrapingBee API for transcript...');
                     const scrapingBeeContent = await this.extractWithScrapingBee(url);
                     if (scrapingBeeContent) {
                         console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
@@ -88,26 +108,6 @@ class ContentService {
                     }
                 } catch (scrapingBeeError: any) {
                     console.log(`   ⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
-                }
-                
-                // Метод 3: Puppeteer (открывает браузер и извлекает транскрипт со страницы)
-                try {
-                    console.log('   [3/3] Trying Puppeteer (browser-based) for transcript...');
-                    // Увеличиваем таймаут до 60 секунд для Puppeteer
-                    const transcriptText = await Promise.race([
-                        this.getYouTubeTranscript(url),
-                        new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
-                        )
-                    ]);
-                    
-                    if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
-                        return { content: transcriptText, sourceType: 'transcript' };
-                    }
-                } catch (puppeteerError: any) {
-                    const errorMsg = puppeteerError.message || 'Unknown error';
-                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
                 }
                 
                 // Метод 4: yt-dlp для извлечения субтитров (если доступны)
@@ -1127,9 +1127,35 @@ class ContentService {
             });
             await new Promise(resolve => setTimeout(resolve, 2000));
 
-            // Стратегия 1: Прямой поиск кнопки "Расшифровка" или "Show transcript"
+            // Стратегия 1: Прямой поиск кнопки "Расшифровка" или "Show transcript" в правой панели
             try {
-                // Ищем все кнопки и ссылки, которые могут вести к транскрипту
+                // Ищем кнопку транскрипта в правой панели (под видео)
+                const transcriptButtonSelectors = [
+                    'button[aria-label*="Show transcript"]',
+                    'button[aria-label*="Показать расшифровку"]',
+                    'button[aria-label*="Show transcript"]',
+                    'ytd-menu-renderer button[aria-label*="transcript"]',
+                    '#actions button[aria-label*="transcript"]',
+                    'ytd-menu-renderer button[aria-label*="расшифровка"]'
+                ];
+
+                for (const selector of transcriptButtonSelectors) {
+                    try {
+                        const button = await page.$(selector);
+                        if (button) {
+                            await button.click();
+                            console.log(`✓ Clicked transcript button: ${selector}`);
+                            await new Promise(resolve => setTimeout(resolve, 3000));
+                            
+                            const transcript = await this.extractTranscriptContent(page);
+                            if (transcript) return transcript;
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+
+                // Также ищем по тексту
                 const transcriptButtonTexts = [
                     'расшифровка',
                     'транскрипт', 
@@ -1158,7 +1184,7 @@ class ContentService {
                 }, transcriptButtonTexts);
 
                 if (transcriptText === 'clicked') {
-                    console.log('✓ Clicked transcript button');
+                    console.log('✓ Clicked transcript button by text');
                     await new Promise(resolve => setTimeout(resolve, 3000));
                     
                     const transcript = await this.extractTranscriptContent(page);
@@ -1247,18 +1273,20 @@ class ContentService {
 
     private async extractTranscriptContent(page: any): Promise<string> {
         try {
-            // Ждем появления панели транскрипта
+            // Ждем появления панели транскрипта (увеличено время ожидания)
             const panelSelectors = [
                 'ytd-engagement-panel-section-list-renderer',
                 '.ytd-transcript-body-renderer',
                 '#segments-container',
+                'ytd-transcript-segment-renderer',
                 '[role="document"]',
-                '#content-text'
+                '#content-text',
+                'ytd-transcript-renderer'
             ];
 
             for (const selector of panelSelectors) {
                 try {
-                    await page.waitForSelector(selector, { timeout: 5000 });
+                    await page.waitForSelector(selector, { timeout: 10000 }); // Увеличено с 5 до 10 секунд
                     
                     const transcriptText = await page.evaluate((sel: string) => {
                         const panel = document.querySelector(sel);
@@ -1266,7 +1294,7 @@ class ContentService {
                         
                         // Собираем текст из всех возможных элементов транскрипта
                         const textElements = panel.querySelectorAll(
-                            'yt-formatted-string, .segment-text, [role="text"], .ytd-transcript-segment-renderer, #content-text'
+                            'yt-formatted-string, .segment-text, [role="text"], .ytd-transcript-segment-renderer, #content-text, ytd-transcript-segment-renderer yt-formatted-string'
                         );
                         
                         const texts: string[] = [];
@@ -1275,8 +1303,11 @@ class ContentService {
                             if (text && 
                                 text.length > 10 && 
                                 !text.match(/^\d+:\d+$/) && // исключаем временные метки
+                                !text.match(/^\d+:\d+:\d+$/) && // исключаем временные метки с секундами
                                 !text.includes('›') &&
-                                !text.includes('0:00')) {
+                                !text.includes('0:00') &&
+                                !text.match(/^Show transcript$/i) &&
+                                !text.match(/^Показать расшифровку$/i)) {
                                 texts.push(text);
                             }
                         });
@@ -1291,6 +1322,31 @@ class ContentService {
                 } catch (e) {
                     continue;
                 }
+            }
+            
+            // Дополнительная попытка: ищем текст напрямую на странице
+            try {
+                const allText = await page.evaluate(() => {
+                    const segments = Array.from(document.querySelectorAll('ytd-transcript-segment-renderer'));
+                    const texts: string[] = [];
+                    segments.forEach((segment: Element) => {
+                        const textEl = segment.querySelector('yt-formatted-string');
+                        if (textEl) {
+                            const text = textEl.textContent?.trim();
+                            if (text && text.length > 10) {
+                                texts.push(text);
+                            }
+                        }
+                    });
+                    return texts.join(' ').trim();
+                });
+                
+                if (allText && allText.length > 50) {
+                    console.log(`✓ Extracted transcript from segments: ${allText.length} chars`);
+                    return allText;
+                }
+            } catch (e) {
+                // Игнорируем ошибки
             }
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
