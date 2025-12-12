@@ -28,7 +28,13 @@ const sequelize = new Sequelize(dbUri, {
     logging: false,
     // Явно указываем, что не нужно использовать имя пользователя как имя БД
     dialectOptions: {
-        // Дополнительные опции для PostgreSQL
+        // SSL для Render PostgreSQL и других облачных провайдеров
+        ssl: process.env.DATABASE_URL?.includes('render.com') || process.env.DATABASE_URL?.includes('railway.app') || process.env.DATABASE_URL?.includes('amazonaws.com') || process.env.DATABASE_URL?.includes('heroku.com')
+            ? {
+                require: true,
+                rejectUnauthorized: false // Для Render PostgreSQL
+            }
+            : false,
     },
 });
 
