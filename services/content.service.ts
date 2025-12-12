@@ -110,6 +110,19 @@ class ContentService {
                     console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
                 }
                 
+                // Метод 4: yt-dlp для извлечения субтитров (если доступны)
+                try {
+                    console.log('   [4/4] Trying yt-dlp for transcript extraction...');
+                    const transcriptText = await this.extractTranscriptWithYtDlp(url);
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
+                    }
+                } catch (ytDlpError: any) {
+                    const errorMsg = ytDlpError.message || 'Unknown error';
+                    console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg}`);
+                }
+                
                 // Все методы получения транскрипта провалились
                 console.log('❌ All transcript extraction methods failed for YouTube. Proceeding to metadata fallback...');
             }
@@ -1284,6 +1297,123 @@ class ContentService {
             console.log('Transcript content extraction failed:', errorMessage);
         }
         return '';
+    }
+
+    /**
+     * Извлекает транскрипт YouTube видео через yt-dlp
+     */
+    private async extractTranscriptWithYtDlp(url: string): Promise<string | null> {
+        try {
+            // @ts-ignore - yt-dlp-exec types may not быть доступны
+            const ytdlp = (await import('yt-dlp-exec')).default;
+            
+            // Сначала получаем информацию о доступных субтитрах
+            const infoResult = await ytdlp(url, {
+                listSubs: true,
+                skipDownload: true,
+                quiet: true,
+                noWarnings: true,
+            });
+            
+            // Пробуем скачать автоматически сгенерированные субтитры или обычные
+            // Используем временный файл для субтитров
+            const tempDir = os.tmpdir();
+            const tempSubsFile = path.join(tempDir, `subs_${Date.now()}.vtt`);
+            
+            try {
+                // Пробуем скачать автоматические субтитры (если доступны)
+                await ytdlp(url, {
+                    writeAutoSub: true,
+                    subLang: 'ru,en,uk', // Приоритет языков
+                    skipDownload: true,
+                    output: tempSubsFile.replace('.vtt', ''),
+                    quiet: true,
+                    noWarnings: true,
+                });
+                
+                // Ищем скачанный файл субтитров
+                const glob = await import('glob');
+                
+                // yt-dlp создает файлы с расширениями .vtt, .srt и т.д.
+                const possibleFiles = glob.sync(`${tempSubsFile.replace('.vtt', '')}.*`);
+                const subFile = possibleFiles.find(f => 
+                    f.endsWith('.vtt') || f.endsWith('.srt') || f.endsWith('.ttml')
+                );
+                
+                if (subFile && await fs.pathExists(subFile)) {
+                    let subContent = await fs.readFile(subFile, 'utf-8');
+                    
+                    // Очищаем VTT формат (убираем временные метки и теги)
+                    subContent = subContent
+                        .replace(/<[^>]+>/g, '') // Убираем HTML теги
+                        .replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, '') // Убираем временные метки
+                        .replace(/^\d+$/gm, '') // Убираем номера строк
+                        .replace(/WEBVTT|Kind:|Language:/gi, '')
+                        .replace(/\n{3,}/g, '\n\n') // Убираем множественные переносы строк
+                        .split('\n')
+                        .map(line => line.trim())
+                        .filter(line => line.length > 0 && !line.match(/^\d+$/))
+                        .join(' ')
+                        .trim();
+                    
+                    // Удаляем временный файл
+                    await fs.remove(subFile);
+                    
+                    if (subContent && subContent.length > 50) {
+                        console.log(`✓ Extracted transcript via yt-dlp: ${subContent.length} chars`);
+                        return subContent;
+                    }
+                }
+            } catch (downloadError: any) {
+                // Если автоматические субтитры недоступны, пробуем обычные
+                try {
+                    await ytdlp(url, {
+                        writeSub: true,
+                        subLang: 'ru,en,uk',
+                        skipDownload: true,
+                        output: tempSubsFile.replace('.vtt', ''),
+                        quiet: true,
+                        noWarnings: true,
+                    });
+                    
+                    const glob = await import('glob');
+                    const possibleFiles = glob.sync(`${tempSubsFile.replace('.vtt', '')}.*`);
+                    const subFile = possibleFiles.find(f => 
+                        f.endsWith('.vtt') || f.endsWith('.srt') || f.endsWith('.ttml')
+                    );
+                    
+                    if (subFile && await fs.pathExists(subFile)) {
+                        let subContent = await fs.readFile(subFile, 'utf-8');
+                        subContent = subContent
+                            .replace(/<[^>]+>/g, '')
+                            .replace(/\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}/g, '')
+                            .replace(/^\d+$/gm, '')
+                            .replace(/WEBVTT|Kind:|Language:/gi, '')
+                            .replace(/\n{3,}/g, '\n\n')
+                            .split('\n')
+                            .map(line => line.trim())
+                            .filter(line => line.length > 0 && !line.match(/^\d+$/))
+                            .join(' ')
+                            .trim();
+                        
+                        await fs.remove(subFile);
+                        
+                        if (subContent && subContent.length > 50) {
+                            console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${subContent.length} chars`);
+                            return subContent;
+                        }
+                    }
+                } catch (manualSubError: any) {
+                    // Оба метода провалились
+                    console.log(`   ⚠️ Both auto and manual subtitles unavailable via yt-dlp`);
+                }
+            }
+            
+            return null;
+        } catch (error: any) {
+            console.warn(`yt-dlp transcript extraction failed: ${error.message}`);
+            return null;
+        }
     }
 
     /**

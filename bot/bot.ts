@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import axios from 'axios';
 import { handleStart } from './handlers/start.handler';
 import { handleAnalyze } from './handlers/analyze.handler';
-import { handleInterests, showInterests, handleAddInterestInput, promptRemoveInterest, handleRemoveInterestCallback, handleToggleInterestCallback, handleSetInterestLevelCallback, REMOVE_INTEREST_PREFIX, TOGGLE_INTEREST_PREFIX, SET_LEVEL_PREFIX } from './handlers/interests.handler';
+import { handleInterests, showInterests, handleAddInterestInput, promptRemoveInterest, handleRemoveInterestCallback, handleToggleInterestCallback, handleSetInterestLevelCallback, handleChangeInterestLevel, REMOVE_INTEREST_PREFIX, TOGGLE_INTEREST_PREFIX, SET_LEVEL_PREFIX, CHANGE_LEVEL_PREFIX } from './handlers/interests.handler';
 import { handleFeedback } from './handlers/feedback.handler';
 import { handleLinkCommand, handleLinkCodeMessage } from './handlers/link.handler';
 import { handleModeCommand, handleModeCallback, MODE_CALLBACK_PREFIX } from './handlers/mode.handler';
@@ -253,10 +253,16 @@ bot.on('callback_query', async (query) => {
         return;
     }
     
+    if (query.data?.startsWith(CHANGE_LEVEL_PREFIX)) {
+        const idx = parseInt(query.data.replace(CHANGE_LEVEL_PREFIX, ''), 10);
+        await handleChangeInterestLevel(bot, query, idx);
+        return;
+    }
     if (query.data?.startsWith(SET_LEVEL_PREFIX)) {
         const data = query.data.replace(SET_LEVEL_PREFIX, '');
-        const [interest, level, skip] = data.split('|');
-        await handleSetInterestLevelCallback(bot, query, interest, level, skip === 'skip');
+        const [interest, level, action] = data.split('|');
+        const isChange = action === 'change';
+        await handleSetInterestLevelCallback(bot, query, interest, level, isChange);
         return;
     }
     if (query.data === 'show_remove_interests') {
