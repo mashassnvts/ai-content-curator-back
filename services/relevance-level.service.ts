@@ -122,9 +122,13 @@ async function generateCompletionWithRetry(
             
             const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
                                    errorMessage.includes('quota exceeded') ||
-                                   errorMessage.includes('daily quota');
+                                   errorMessage.includes('daily quota') ||
+                                   errorMessage.includes('FreeTier') ||
+                                   (errorCode === 429 && errorMessage.includes('limit: 20'));
             
+            // Если квота превышена, сразу прекращаем попытки
             if (isQuotaExceeded) {
+                console.warn(`❌ Quota exceeded detected. Stopping retries.`);
                 throw error;
             } else if (isRetryable) {
                 // Пытаемся извлечь рекомендуемую задержку из ответа API

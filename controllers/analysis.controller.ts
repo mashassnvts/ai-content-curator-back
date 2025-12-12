@@ -96,7 +96,14 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
                         try {
                             const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
                             console.log(`🚀 Using optimized analysis: ${interestsWithLevels.length} interests in ONE API request`);
-                            const relevanceResults = await analyzeRelevanceLevelForMultipleInterests(content, interestsWithLevels);
+                            
+                            // Устанавливаем таймаут для анализа уровня релевантности (максимум 30 секунд)
+                            const relevanceResults = await Promise.race([
+                                analyzeRelevanceLevelForMultipleInterests(content, interestsWithLevels),
+                                new Promise<never>((_, reject) => 
+                                    setTimeout(() => reject(new Error('Relevance level analysis timeout')), 30000)
+                                )
+                            ]);
                             
                             // Сохраняем оценку релевантности для каждого интереса
                             for (const { interest, result } of relevanceResults) {
@@ -133,8 +140,21 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
                                 console.log(`   - Relevance Score: ${relevanceLevelResult.relevanceScore}/100`);
                             }
                         } catch (error: any) {
-                            console.warn(`⚠️ Failed to analyze relevance level: ${error.message}`);
-                            console.warn(`   Stack: ${error.stack || 'No stack trace'}`);
+                            const errorMessage = error.message || '';
+                            const isQuotaExceeded = errorMessage.includes('quota exceeded') || 
+                                                   errorMessage.includes('QUOTA_EXCEEDED') ||
+                                                   errorMessage.includes('FreeTier') ||
+                                                   (error.status === 429 && errorMessage.includes('limit: 20'));
+                            
+                            if (isQuotaExceeded) {
+                                console.warn(`⏭️ [Relevance Level] Skipping analysis: API quota exceeded. Main analysis will continue without relevance level.`);
+                            } else if (errorMessage.includes('timeout')) {
+                                console.warn(`⏭️ [Relevance Level] Skipping analysis: timeout. Main analysis will continue without relevance level.`);
+                            } else {
+                                console.warn(`⚠️ Failed to analyze relevance level: ${error.message}`);
+                                console.warn(`   Stack: ${error.stack || 'No stack trace'}`);
+                            }
+                            // Не прерываем основной анализ, если анализ уровня релевантности не удался
                         }
                     }
                 } else {

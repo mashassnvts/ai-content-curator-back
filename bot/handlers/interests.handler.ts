@@ -59,20 +59,21 @@ export const showInterests = async (bot: TelegramBot, chatId: number, telegramId
 
     await bot.sendMessage(
         chatId,
-        `📋 **Ваши интересы (${mode === 'linked' ? '🔗 синхронные' : '🙈 гостевые'}):**\n\n${interestsList}\n\n*Активных: ${activeCount} из ${totalCount}*\n\nНажмите на интерес, чтобы включить/выключить его, или на 📊 чтобы изменить уровень.`,
+        `📋 **Ваши интересы (${mode === 'linked' ? '🔗 синхронные' : '🙈 гостевые'}):**\n\n${interestsList}\n\n*Активных: ${activeCount} из ${totalCount}*\n\n💡 **Как изменить уровень:**\n• Нажмите на интерес (✅/○) - включить/выключить\n• Нажмите 📊 - изменить уровень (новичок/любитель/профессионал)`,
         {
             parse_mode: 'Markdown',
             reply_markup: {
                 inline_keyboard: filteredInterests.map((interest, idx) => {
                     const level = levels?.[interest.toLowerCase()];
                     const levelEmoji = level === 'novice' ? '🟢' : level === 'amateur' ? '🟡' : level === 'professional' ? '🔴' : '⚪';
+                    const levelText = level === 'novice' ? 'Новичок' : level === 'amateur' ? 'Любитель' : level === 'professional' ? 'Профессионал' : 'Не указан';
                     return [
                         {
                             text: `${activeSet.has(interest) ? '✅' : '○'} ${interest}`,
                             callback_data: `${TOGGLE_INTEREST_PREFIX}${idx}`
                         },
                         {
-                            text: `📊 ${levelEmoji} Уровень`,
+                            text: `📊 ${levelEmoji} ${levelText}`,
                             callback_data: `${CHANGE_LEVEL_PREFIX}${idx}`
                         }
                     ];

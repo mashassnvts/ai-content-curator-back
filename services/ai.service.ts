@@ -91,7 +91,7 @@ async function generateCompletionWithRetry(
     modelName: string,
     systemInstruction: string,
     userPrompt: string,
-    retries = 5, // Увеличено с 3 до 5 для лучшей обработки перегрузки
+    retries = 3, // Уменьшено до 3 для более быстрой обработки
     delay = 2000
 ) {
     let lastError: any;
@@ -154,12 +154,22 @@ async function generateCompletionWithRetry(
             
             const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
                                    errorMessage.includes('quota exceeded') ||
-                                   errorMessage.includes('daily quota');
+                                   errorMessage.includes('daily quota') ||
+                                   errorMessage.includes('FreeTier') ||
+                                   (errorCode === 429 && errorMessage.includes('limit: 20'));
             
             if (isQuotaExceeded) {
-                // Дневной лимит исчерпан - не retry
+                // Дневной лимит исчерпан - не retry, сразу выбрасываем ошибку
+                console.warn(`❌ Quota exceeded detected. Stopping retries immediately.`);
                 throw error;
             } else if (isRetryable) {
+                // Ограничиваем количество попыток для rate limit до 2 (вместо 5)
+                // Это ускорит обработку при временных проблемах
+                if (i >= 2) {
+                    console.warn(`⚠️ Max retries reached (${i + 1}). Stopping.`);
+                    throw error;
+                }
+                
                 // Пытаемся извлечь рекомендуемую задержку из ответа API
                 let retryDelayMs = delay;
                 
@@ -201,8 +211,8 @@ async function generateCompletionWithRetry(
                     retryDelayMs = delay * 2;
                 }
                 
-                // Минимальная задержка 1 секунда, максимальная 60 секунд
-                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 60000));
+                // Минимальная задержка 1 секунда, максимальная 10 секунд (уменьшено с 60)
+                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 10000));
                 
                 console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage.substring(0, 200)}). Retrying in ${retryDelayMs / 1000}s...`);
                 await new Promise(res => setTimeout(res, retryDelayMs));
