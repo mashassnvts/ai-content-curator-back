@@ -10,6 +10,58 @@ if (!apiKey) {
 // Или передать через опции (проверяем оба варианта)
 const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
 
+// Очередь запросов для предотвращения rate limiting
+// Ограничиваем количество одновременных запросов к Gemini API
+class RequestQueue {
+    private queue: Array<() => Promise<any>> = [];
+    private running = 0;
+    private maxConcurrent: number;
+    private delayBetweenRequests: number;
+
+    constructor(maxConcurrent = 3, delayBetweenRequests = 500) {
+        this.maxConcurrent = maxConcurrent;
+        this.delayBetweenRequests = delayBetweenRequests;
+    }
+
+    async add<T>(fn: () => Promise<T>): Promise<T> {
+        return new Promise((resolve, reject) => {
+            this.queue.push(async () => {
+                try {
+                    const result = await fn();
+                    resolve(result);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+            this.process();
+        });
+    }
+
+    private async process() {
+        if (this.running >= this.maxConcurrent || this.queue.length === 0) {
+            return;
+        }
+
+        this.running++;
+        const task = this.queue.shift();
+        if (task) {
+            try {
+                await task();
+            } finally {
+                this.running--;
+                // Небольшая задержка между запросами для предотвращения rate limiting
+                await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
+                this.process();
+            }
+        } else {
+            this.running--;
+        }
+    }
+}
+
+// Создаем глобальную очередь для всех запросов к Gemini API
+const apiRequestQueue = new RequestQueue(3, 500); // Максимум 3 параллельных запроса, задержка 500мс между ними
+
 export interface UserFeedbackHistory {
     url: string;
     userInterests: string;
@@ -39,7 +91,7 @@ async function generateCompletionWithRetry(
     modelName: string,
     systemInstruction: string,
     userPrompt: string,
-    retries = 3,
+    retries = 5, // Увеличено с 3 до 5 для лучшей обработки перегрузки
     delay = 2000
 ) {
     let lastError: any;
@@ -52,10 +104,14 @@ async function generateCompletionWithRetry(
             // Новый SDK использует ai.models.generateContent
             // systemInstruction можно передать отдельно или включить в contents
             const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${userPrompt}` : userPrompt;
-            const completionPromise = genAI.models.generateContent({
-                model: modelName,
-                contents: fullPrompt,
-            });
+            
+            // Используем очередь для предотвращения rate limiting
+            const completionPromise = apiRequestQueue.add(() => 
+                genAI.models.generateContent({
+                    model: modelName,
+                    contents: fullPrompt,
+                })
+            );
             
             const completion = await Promise.race([completionPromise, timeoutPromise]) as any;
             return completion;
@@ -104,9 +160,57 @@ async function generateCompletionWithRetry(
                 // Дневной лимит исчерпан - не retry
                 throw error;
             } else if (isRetryable) {
-                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage}). Retrying in ${delay / 1000}s...`);
-                await new Promise(res => setTimeout(res, delay));
-                delay *= 1.5;
+                // Пытаемся извлечь рекомендуемую задержку из ответа API
+                let retryDelayMs = delay;
+                
+                // Ищем retry delay в ответе API (формат: "Please retry in Xs" или retryDelay в секундах)
+                const retryDelayMatch = errorMessage.match(/retry in ([\d.]+)s/i) || 
+                                       errorMessage.match(/retryDelay["\s:]+([\d.]+)/i);
+                
+                if (retryDelayMatch) {
+                    const retryDelaySeconds = parseFloat(retryDelayMatch[1]);
+                    if (!isNaN(retryDelaySeconds) && retryDelaySeconds > 0) {
+                        retryDelayMs = Math.ceil(retryDelaySeconds * 1000);
+                        console.log(`📊 API suggested retry delay: ${retryDelaySeconds}s`);
+                    }
+                }
+                
+                // Также проверяем details в ответе для retryDelay
+                try {
+                    const errorDetails = errorResponse?.error?.details || errorResponse?.details || [];
+                    for (const detail of Array.isArray(errorDetails) ? errorDetails : [errorDetails]) {
+                        if (detail?.['@type']?.includes('RetryInfo') && detail.retryDelay) {
+                            // retryDelay может быть в формате "51s" или объект с секундами
+                            const delayStr = typeof detail.retryDelay === 'string' 
+                                ? detail.retryDelay.replace('s', '') 
+                                : detail.retryDelay;
+                            const delaySeconds = parseFloat(delayStr);
+                            if (!isNaN(delaySeconds) && delaySeconds > 0) {
+                                retryDelayMs = Math.ceil(delaySeconds * 1000);
+                                console.log(`📊 API retryDelay from details: ${delaySeconds}s`);
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Игнорируем ошибки парсинга
+                }
+                
+                // Для перегрузки (503) используем более длинные задержки, если API не указал свою
+                if (isOverloaded && retryDelayMs === delay) {
+                    retryDelayMs = delay * 2;
+                }
+                
+                // Минимальная задержка 1 секунда, максимальная 60 секунд
+                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 60000));
+                
+                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage.substring(0, 200)}). Retrying in ${retryDelayMs / 1000}s...`);
+                await new Promise(res => setTimeout(res, retryDelayMs));
+                
+                // Увеличиваем базовую задержку для следующей попытки (если API не указал свою)
+                if (retryDelayMs === delay) {
+                    delay *= isOverloaded ? 1.8 : 1.5;
+                }
             } else {
                 throw error;
             }
@@ -701,6 +805,20 @@ ${feedbackContext}
             throw new Error(`Модель "${aiModel}" недоступна. Используйте gemini-2.5-flash или gemini-1.5-pro. Получите API ключ на https://aistudio.google.com/app/apikey`);
         }
         
+        // Обработка ошибки перегрузки модели (503) - модель временно недоступна
+        const isOverloadedError = errorMessage.includes('overloaded') || 
+                                 errorMessage.includes('UNAVAILABLE') ||
+                                 errorMessage.includes('503') ||
+                                 errorCode === 503 ||
+                                 (errorMessage.includes('The model is overloaded'));
+        
+        if (isOverloadedError) {
+            console.error('❌ Model is overloaded (503). All retry attempts exhausted.');
+            console.error('💡 Gemini API is temporarily unavailable due to high load.');
+            console.error('📝 Solution: Please try again in a few minutes.');
+            throw new Error(`Модель Gemini временно перегружена. Система выполнила 3 попытки с задержками, но модель все еще недоступна. Пожалуйста, попробуйте повторить запрос через несколько минут.`);
+        }
+        
         // Обработка ошибки rate limit (слишком много запросов в минуту)
         if (error.message && (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('quota') || error.message.includes('rate limit') || error.message.includes('RATE_LIMIT_EXCEEDED'))) {
             const isQuotaExceeded = error.message.includes('quota') || error.message.includes('QUOTA_EXCEEDED');
@@ -708,21 +826,24 @@ ${feedbackContext}
             
             if (isQuotaExceeded) {
                 console.error('❌ Daily quota exceeded for Gemini API!');
-                console.error('💡 Free tier limits:');
-                console.error('   - Up to 60 requests per minute');
-                console.error('   - Up to 1,500 requests per day');
-                console.error('   - Up to 1M tokens per day');
+                console.error('💡 Paid Tier 1 limits:');
+                console.error('   - Up to 1,000 requests per minute (RPM)');
+                console.error('   - Up to 1M tokens per minute (TPM)');
+                console.error('   - Up to 10,000 requests per day (RPD)');
                 console.error('');
                 console.error('📝 Solutions:');
                 console.error('   1. Wait 24 hours for quota reset');
-                console.error('   2. Upgrade to paid tier for higher limits');
-                console.error('   3. Use gemini-2.5-flash (faster, uses less quota)');
-                throw new Error(`Превышен дневной лимит запросов для Gemini API. Бесплатный лимит: до 1,500 запросов в день. Подождите 24 часа или обновите тариф.`);
+                console.error('   2. Check your usage in Google Cloud Console');
+                console.error('   3. Consider upgrading to higher tier if needed');
+                throw new Error(`Превышен дневной лимит запросов для Gemini API. Платный тариф Tier 1: до 10,000 запросов в день. Подождите 24 часа или проверьте использование в Google Cloud Console.`);
             } else if (isRateLimit) {
                 console.error('❌ Rate limit exceeded (too many requests per minute)!');
-                console.error('💡 Free tier: up to 60 requests per minute');
-                console.error('📝 Solution: Wait a few seconds and try again. The system will retry automatically.');
-                throw new Error(`Превышен лимит запросов в минуту для Gemini API. Бесплатный лимит: до 60 запросов в минуту. Подождите несколько секунд и попробуйте снова.`);
+                console.error('💡 Paid Tier 1 limits:');
+                console.error('   - Up to 1,000 requests per minute (RPM)');
+                console.error('   - Up to 1M tokens per minute (TPM)');
+                console.error('   - Up to 10,000 requests per day (RPD)');
+                console.error('📝 Solution: Wait a few seconds and try again. The system will retry automatically with API-suggested delay.');
+                throw new Error(`Превышен лимит запросов в минуту для Gemini API. Платный тариф Tier 1: до 1,000 запросов в минуту. Система автоматически повторит запрос с рекомендуемой задержкой.`);
             } else {
                 console.error('❌ Resource exhausted error from Gemini API');
                 console.error('💡 This might be a rate limit or quota issue.');
