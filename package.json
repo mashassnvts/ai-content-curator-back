@@ -4,9 +4,10 @@
   "main": "dist/server.js",
   "scripts": {
     "start": "node dist/server.js",
+    "start:bot": "node dist/bot-runner.js",
     "clean": "rimraf dist",
     "build": "npm run clean && tsc",
-    "postinstall": "node -e \"if (process.env.INSTALL_CHROME !== 'false') { try { require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit'}); } catch(e) { console.log('Chrome installation skipped or failed:', e.message); } }\"",
+    "postinstall": "node -e \"if (process.env.INSTALL_CHROME !== 'false') { console.log('🔧 Installing Chrome for Puppeteer...'); try { require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit', cwd: process.cwd()}); console.log('✓ Chrome installation completed'); } catch(e) { console.log('⚠️ Chrome installation skipped or failed:', e.message); console.log('   Chrome will be downloaded on first use if needed'); } } else { console.log('⏭️ Chrome installation skipped (INSTALL_CHROME=false)'); }\"",
     "dev": "ts-node-dev --respawn --transpile-only server.ts",
     "bot": "ts-node-dev --respawn --transpile-only bot-runner.ts",
     "bot:dev": "ts-node bot-runner.ts",

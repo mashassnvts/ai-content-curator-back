@@ -8,6 +8,58 @@ if (!apiKey) {
 
 const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
 
+// Очередь запросов для предотвращения rate limiting (используем ту же очередь, что и в ai.service.ts)
+// Импортируем очередь из ai.service.ts или создаем общую
+class RequestQueue {
+    private queue: Array<() => Promise<any>> = [];
+    private running = 0;
+    private maxConcurrent: number;
+    private delayBetweenRequests: number;
+
+    constructor(maxConcurrent = 3, delayBetweenRequests = 500) {
+        this.maxConcurrent = maxConcurrent;
+        this.delayBetweenRequests = delayBetweenRequests;
+    }
+
+    async add<T>(fn: () => Promise<T>): Promise<T> {
+        return new Promise((resolve, reject) => {
+            this.queue.push(async () => {
+                try {
+                    const result = await fn();
+                    resolve(result);
+                } catch (error) {
+                    reject(error);
+                }
+            });
+            this.process();
+        });
+    }
+
+    private async process() {
+        if (this.running >= this.maxConcurrent || this.queue.length === 0) {
+            return;
+        }
+
+        this.running++;
+        const task = this.queue.shift();
+        if (task) {
+            try {
+                await task();
+            } finally {
+                this.running--;
+                // Небольшая задержка между запросами для предотвращения rate limiting
+                await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
+                this.process();
+            }
+        } else {
+            this.running--;
+        }
+    }
+}
+
+// Создаем глобальную очередь для всех запросов к Gemini API
+const apiRequestQueue = new RequestQueue(3, 500); // Максимум 3 параллельных запроса, задержка 500мс между ними
+
 export interface RelevanceLevelResult {
     contentLevel: 'novice' | 'amateur' | 'professional'; // Уровень профессиональности контента (новичок, любитель, профессионал)
     userLevelMatch: 'perfect' | 'good' | 'challenging' | 'too_easy' | 'too_hard'; // Соответствие уровню пользователя
@@ -38,17 +90,28 @@ async function generateCompletionWithRetry(
             );
             
             const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${userPrompt}` : userPrompt;
-            const completionPromise = genAI.models.generateContent({
-                model: modelName,
-                contents: fullPrompt,
-            });
+            
+            // Используем очередь для предотвращения rate limiting
+            const completionPromise = apiRequestQueue.add(() => 
+                genAI.models.generateContent({
+                    model: modelName,
+                    contents: fullPrompt,
+                })
+            );
             
             const completion = await Promise.race([completionPromise, timeoutPromise]) as any;
             return completion;
         } catch (error: any) {
             lastError = error;
-            const errorMessage = String(error.message || error || JSON.stringify(error));
-            const errorCode = error.code || error.status || error.statusCode || '';
+            const errorResponse = error.response || error.error || error;
+            const errorMessage = String(
+                errorResponse?.error?.message || 
+                errorResponse?.message || 
+                error.message || 
+                error || 
+                JSON.stringify(error)
+            );
+            const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
             
             const isRetryable = errorMessage.includes('503') || 
                                errorMessage.includes('429') || 
@@ -64,9 +127,51 @@ async function generateCompletionWithRetry(
             if (isQuotaExceeded) {
                 throw error;
             } else if (isRetryable) {
-                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage}). Retrying in ${delay / 1000}s...`);
-                await new Promise(res => setTimeout(res, delay));
-                delay *= 1.5;
+                // Пытаемся извлечь рекомендуемую задержку из ответа API
+                let retryDelayMs = delay;
+                
+                // Ищем retry delay в ответе API
+                const retryDelayMatch = errorMessage.match(/retry in ([\d.]+)s/i) || 
+                                       errorMessage.match(/retryDelay["\s:]+([\d.]+)/i);
+                
+                if (retryDelayMatch) {
+                    const retryDelaySeconds = parseFloat(retryDelayMatch[1]);
+                    if (!isNaN(retryDelaySeconds) && retryDelaySeconds > 0) {
+                        retryDelayMs = Math.ceil(retryDelaySeconds * 1000);
+                        console.log(`📊 API suggested retry delay: ${retryDelaySeconds}s`);
+                    }
+                }
+                
+                // Проверяем details в ответе для retryDelay
+                try {
+                    const errorDetails = errorResponse?.error?.details || errorResponse?.details || [];
+                    for (const detail of Array.isArray(errorDetails) ? errorDetails : [errorDetails]) {
+                        if (detail?.['@type']?.includes('RetryInfo') && detail.retryDelay) {
+                            const delayStr = typeof detail.retryDelay === 'string' 
+                                ? detail.retryDelay.replace('s', '') 
+                                : detail.retryDelay;
+                            const delaySeconds = parseFloat(delayStr);
+                            if (!isNaN(delaySeconds) && delaySeconds > 0) {
+                                retryDelayMs = Math.ceil(delaySeconds * 1000);
+                                console.log(`📊 API retryDelay from details: ${delaySeconds}s`);
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Игнорируем ошибки парсинга
+                }
+                
+                // Минимальная задержка 1 секунда, максимальная 60 секунд
+                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 60000));
+                
+                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage.substring(0, 200)}). Retrying in ${retryDelayMs / 1000}s...`);
+                await new Promise(res => setTimeout(res, retryDelayMs));
+                
+                // Увеличиваем базовую задержку для следующей попытки (если API не указал свою)
+                if (retryDelayMs === delay) {
+                    delay *= 1.5;
+                }
             } else {
                 throw error;
             }
@@ -181,7 +286,7 @@ ${userLevelsDescription}
     "recommendations": "<рекомендации на русском языке (опционально)>"
 }`;
 
-    const aiModel = process.env.AI_MODEL || 'gemini-1.5-flash';
+    const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
 
     try {
         console.log(`🔍 Analyzing relevance level using model: ${aiModel}`);

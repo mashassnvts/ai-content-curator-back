@@ -93,10 +93,11 @@ class ContentService {
                 // Метод 3: Puppeteer (открывает браузер и извлекает транскрипт со страницы)
                 try {
                     console.log('   [3/3] Trying Puppeteer (browser-based) for transcript...');
+                    // Увеличиваем таймаут до 60 секунд для Puppeteer
                     const transcriptText = await Promise.race([
                         this.getYouTubeTranscript(url),
                         new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 45000)
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
                         )
                     ]);
                     
@@ -393,14 +394,47 @@ class ContentService {
         // Если не нашли, пытаемся использовать Chrome, установленный через Puppeteer
         if (!foundPath) {
             try {
-                // Используем сам puppeteer для получения пути к Chrome
-                const puppeteerModule = await import('puppeteer');
-                // @ts-ignore - executablePath может быть доступен через внутренний API
-                const puppeteerPath = (puppeteerModule as any).executablePath?.() || 
-                                     (puppeteerModule as any).default?.executablePath?.();
-                if (puppeteerPath && fsModule.existsSync(puppeteerPath)) {
-                    foundPath = puppeteerPath;
-                    console.log(`✓ Found Puppeteer-installed Chrome at: ${foundPath}`);
+                // Используем @puppeteer/browsers для поиска установленного Chrome
+                const { detectBrowserPlatform, getInstalledBrowsers, computeExecutablePath, Browser } = await import('@puppeteer/browsers');
+                const cacheDir = process.env.PUPPETEER_CACHE_DIR || 
+                                (process.env.HOME ? `${process.env.HOME}/.cache/puppeteer` : null) ||
+                                '/opt/render/.cache/puppeteer' ||
+                                os.homedir() + '/.cache/puppeteer';
+                
+                try {
+                    // Определяем платформу и ищем установленные браузеры
+                    const platform = detectBrowserPlatform();
+                    if (platform) {
+                        const installedBrowsers = await getInstalledBrowsers({
+                            cacheDir: cacheDir
+                        });
+                        
+                        // Ищем Chrome среди установленных браузеров
+                        const chromeBrowser = installedBrowsers.find((b: any) => b.browser === Browser.CHROME);
+                        if (chromeBrowser) {
+                            const chromePath = computeExecutablePath({
+                                browser: Browser.CHROME,
+                                cacheDir: cacheDir,
+                                buildId: chromeBrowser.buildId,
+                                platform: platform
+                            });
+                            
+                            if (chromePath && fsModule.existsSync(chromePath)) {
+                                foundPath = chromePath;
+                                console.log(`✓ Found Puppeteer-installed Chrome via @puppeteer/browsers at: ${foundPath}`);
+                            }
+                        }
+                    }
+                } catch (computeError) {
+                    // Если новый API не сработал, пробуем старый способ
+                    const puppeteerModule = await import('puppeteer');
+                    // @ts-ignore - executablePath может быть доступен через внутренний API
+                    const puppeteerPath = (puppeteerModule as any).executablePath?.() || 
+                                         (puppeteerModule as any).default?.executablePath?.();
+                    if (puppeteerPath && fsModule.existsSync(puppeteerPath)) {
+                        foundPath = puppeteerPath;
+                        console.log(`✓ Found Puppeteer-installed Chrome at: ${foundPath}`);
+                    }
                 }
             } catch (e) {
                 console.log(`⚠️ Could not get Chrome path from Puppeteer: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -435,11 +469,42 @@ class ContentService {
                             // Пробуем разные возможные структуры
                             const possibleChromePaths = [
                                 `${cachePath}/${dir}/chrome-linux64/chrome`,
+                                `${cachePath}/${dir}/chrome-linux64/chromium`,
                                 `${cachePath}/${dir}/chrome-linux/chrome`,
+                                `${cachePath}/${dir}/chrome-linux/chromium`,
                                 `${cachePath}/${dir}/chrome/chrome`,
+                                `${cachePath}/${dir}/chrome/chromium`,
                                 `${cachePath}/${dir}/chrome`,
                                 `${cachePath}/${dir}/chromium`,
+                                `${cachePath}/${dir}/headless_shell`,
                             ];
+                            
+                            // Также пробуем использовать @puppeteer/browsers для вычисления пути
+                            try {
+                                const { detectBrowserPlatform, getInstalledBrowsers, computeExecutablePath, Browser } = await import('@puppeteer/browsers');
+                                const platform = detectBrowserPlatform();
+                                if (platform) {
+                                    const installedBrowsers = await getInstalledBrowsers({
+                                        cacheDir: cachePath
+                                    });
+                                    const chromeBrowser = installedBrowsers.find((b: any) => b.browser === Browser.CHROME);
+                                    if (chromeBrowser) {
+                                        const computedPath = computeExecutablePath({
+                                            browser: Browser.CHROME,
+                                            cacheDir: cachePath,
+                                            buildId: chromeBrowser.buildId,
+                                            platform: platform
+                                        });
+                                        if (computedPath && fsModule.existsSync(computedPath)) {
+                                            foundPath = computedPath;
+                                            console.log(`✓ Found Chrome via computeExecutablePath at: ${foundPath}`);
+                                            break;
+                                        }
+                                    }
+                                }
+                            } catch (e) {
+                                // Игнорируем ошибки computeExecutablePath
+                            }
                             
                             for (const chromePath of possibleChromePaths) {
                                 if (fsModule.existsSync(chromePath)) {
@@ -651,9 +716,13 @@ class ContentService {
                                                 }
                                                 
                                                 console.log(`✓ Found caption track: ${captionTrack.languageCode || 'unknown'}`);
+                                                console.log(`   Attempting to download transcript from URL...`);
                                                 const transcript = await this.downloadTranscriptFromUrl(captionUrl);
-                                                if (transcript) {
+                                                if (transcript && transcript.trim().length > 50) {
+                                                    console.log(`✓✓✓ SUCCESS: Downloaded transcript from caption track (${transcript.length} chars)`);
                                                     return transcript;
+                                                } else {
+                                                    console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
                                                 }
                                             }
                                         }
@@ -694,11 +763,15 @@ class ContentService {
                                                     // Если декодирование не удалось, используем исходный URL
                                                 }
                                                 
-                                                console.log(`✓ Found caption URL via regex: ${decodedUrl.substring(0, 100)}...`);
-                                                const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                                                if (transcript) {
-                                                    return transcript;
-                                                }
+                            console.log(`✓ Found caption URL via regex: ${decodedUrl.substring(0, 100)}...`);
+                            console.log(`   Attempting to download transcript from URL...`);
+                            const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
+                            if (transcript && transcript.trim().length > 50) {
+                                console.log(`✓✓✓ SUCCESS: Downloaded transcript via ScrapingBee (${transcript.length} chars)`);
+                                return transcript;
+                            } else {
+                                console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
+                            }
                                             }
                                         }
                                     }
@@ -737,9 +810,13 @@ class ContentService {
                             }
                             
                             console.log(`✓ Found transcript URL directly in HTML`);
+                            console.log(`   Attempting to download transcript from URL...`);
                             const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                            if (transcript) {
+                            if (transcript && transcript.trim().length > 50) {
+                                console.log(`✓✓✓ SUCCESS: Downloaded transcript directly from HTML (${transcript.length} chars)`);
                                 return transcript;
+                            } else {
+                                console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
                             }
                         }
                     }
@@ -754,7 +831,14 @@ class ContentService {
                 const transcriptUrl = await this.getYouTubeTranscriptUrl(videoId);
                 if (transcriptUrl) {
                     console.log(`✓ Got transcript URL from API`);
-                    return await this.downloadTranscriptFromUrl(transcriptUrl);
+                    console.log(`   Attempting to download transcript from URL...`);
+                    const transcript = await this.downloadTranscriptFromUrl(transcriptUrl);
+                    if (transcript && transcript.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Downloaded transcript via YouTube API (${transcript.length} chars)`);
+                        return transcript;
+                    } else {
+                        console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
+                    }
                 }
             } catch (e) {
                 console.log(`   YouTube API method failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
@@ -787,17 +871,39 @@ class ContentService {
                 console.log(`   Warning: Could not decode URL, using original`);
             }
             
+            console.log(`   📥 Downloading transcript from: ${decodedUrl.substring(0, 150)}...`);
+            
             const axios = await import('axios');
             const transcriptResponse = await axios.default.get(decodedUrl, {
-                timeout: 10000,
+                timeout: 15000, // Увеличено с 10 до 15 секунд
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                     'Accept': 'text/xml,application/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
-                }
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                    'Referer': 'https://www.youtube.com/' // Добавляем Referer для YouTube
+                },
+                maxRedirects: 5,
+                validateStatus: (status) => status < 500 // Принимаем все статусы кроме 5xx
             });
             
+            const status = transcriptResponse.status;
+            if (status !== 200) {
+                console.log(`   ⚠️ Transcript URL returned status ${status}: ${decodedUrl.substring(0, 100)}...`);
+                return null;
+            }
+            
             const transcriptXml = transcriptResponse.data;
+            
+            // Проверяем, что получили XML
+            if (typeof transcriptXml !== 'string' || !transcriptXml.includes('<text')) {
+                console.log(`   ⚠️ Transcript response is not valid XML (length: ${transcriptXml?.length || 0})`);
+                // Возможно это HTML страница с ошибкой, пробуем найти текст в HTML
+                if (typeof transcriptXml === 'string' && transcriptXml.includes('<html')) {
+                    console.log(`   → Got HTML instead of XML, transcript may be unavailable`);
+                }
+                return null;
+            }
+            
             const transcriptItems: string[] = [];
             
             // Парсим XML транскрипта (YouTube использует формат timedtext)
@@ -816,17 +922,47 @@ class ContentService {
             }
             
             if (transcriptItems.length > 0) {
-                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items`);
-                return transcriptItems.join(' ');
+                const fullTranscript = transcriptItems.join(' ');
+                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items (${fullTranscript.length} chars)`);
+                return fullTranscript;
+            } else {
+                console.log(`   ⚠️ No transcript items found in XML (XML length: ${transcriptXml.length})`);
+                // Пробуем альтернативный формат парсинга
+                const altMatches = transcriptXml.matchAll(/<text[^>]*start="[^"]*"[^>]*>([^<]+)<\/text>/g);
+                for (const match of altMatches) {
+                    const text = match[1]
+                        .replace(/&amp;/g, '&')
+                        .replace(/&lt;/g, '<')
+                        .replace(/&gt;/g, '>')
+                        .replace(/&quot;/g, '"')
+                        .replace(/&#39;/g, "'")
+                        .trim();
+                    if (text) {
+                        transcriptItems.push(text);
+                    }
+                }
+                if (transcriptItems.length > 0) {
+                    const fullTranscript = transcriptItems.join(' ');
+                    console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items using alternative parsing (${fullTranscript.length} chars)`);
+                    return fullTranscript;
+                }
             }
             
             return null;
         } catch (error: any) {
             const status = error.response?.status;
+            const errorMessage = error.message || 'Unknown error';
+            
             if (status === 404) {
-                console.log(`⚠️ Transcript URL returned 404 (may be expired or invalid): ${captionUrl.substring(0, 100)}...`);
+                console.log(`   ⚠️ Transcript URL returned 404 (may be expired or invalid): ${captionUrl.substring(0, 100)}...`);
+            } else if (status === 403) {
+                console.log(`   ⚠️ Transcript URL returned 403 (access forbidden): ${captionUrl.substring(0, 100)}...`);
+            } else if (errorMessage.includes('timeout') || errorMessage.includes('ECONNABORTED')) {
+                console.log(`   ⚠️ Transcript download timeout: ${errorMessage}`);
+            } else if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+                console.log(`   ⚠️ DNS error when downloading transcript: ${errorMessage}`);
             } else {
-                console.log(`⚠️ Failed to download transcript from URL: ${error.message}`);
+                console.log(`   ⚠️ Failed to download transcript from URL (status: ${status || 'N/A'}): ${errorMessage.substring(0, 200)}`);
             }
             return null;
         }
