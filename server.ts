@@ -90,32 +90,65 @@ app.use((err: any, req: Request, res: Response, next: any) => {
 });
 
 const startServer = async () => {
-    // Пытаемся подключиться к БД с таймаутом
-    const dbConnectPromise = sequelize.authenticate()
-        .then(() => {
-            console.log('Database connection established successfully.');
-            return sequelize.sync({ alter: true });
-        })
-        .then(() => {
-            console.log('Database models synchronized successfully.');
-        })
-        .catch((error) => {
-            console.error('Database connection/sync error:', error);
-            console.warn('Server will start without database connection. Some features may not work.');
-        });
+    let dbConnected = false;
+    
+    // Пытаемся подключиться к БД и синхронизировать таблицы
+    try {
+        console.log('🔌 Connecting to database...');
+        await sequelize.authenticate();
+        console.log('✅ Database connection established successfully.');
+        
+        console.log('📊 Synchronizing database models...');
+        // Используем alter: true для создания недостающих таблиц и обновления существующих
+        await sequelize.sync({ alter: true, logging: false });
+        console.log('✅ Database models synchronized successfully.');
+        
+        // Проверяем, что таблицы созданы
+        const tables = await sequelize.getQueryInterface().showAllTables();
+        console.log(`📋 Found ${tables.length} table(s) in database:`, tables);
+        
+        dbConnected = true;
+    } catch (error: any) {
+        console.error('❌ Database connection/sync error:', error.message);
+        if (error.stack) {
+            console.error('   Stack:', error.stack);
+        }
+        console.warn('⚠️ Server will start without database connection. Some features may not work.');
+        console.warn('💡 Tip: Check that DATABASE_URL is correct and PostgreSQL service is running.');
+        dbConnected = false;
+    }
 
     // Запускаем сервер независимо от результата подключения к БД
     app.listen(PORT, '0.0.0.0', () => {
-        console.log(`Server is running on port ${PORT}`);
-        console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+        console.log(`🚀 Server is running on port ${PORT}`);
+        console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
         
-        // Запускаем периодическую очистку истории (каждые 24 часа)
-        const cleanupIntervalHours = parseInt(process.env.HISTORY_CLEANUP_INTERVAL_HOURS || '24', 10);
-        historyCleanupService.startPeriodicCleanup(cleanupIntervalHours);
+        // Запускаем периодическую очистку истории только если БД подключена
+        if (dbConnected) {
+            const cleanupIntervalHours = parseInt(process.env.HISTORY_CLEANUP_INTERVAL_HOURS || '48', 10);
+            console.log(`🔄 Starting periodic history cleanup (every ${cleanupIntervalHours} hours)...`);
+            historyCleanupService.startPeriodicCleanup(cleanupIntervalHours);
+        } else {
+            console.warn('⏭️ Skipping history cleanup: database not connected');
+        }
     });
-
-    // Ждем подключения к БД (но не блокируем запуск сервера)
-    await dbConnectPromise;
+    
+    // Запускаем Telegram бота после запуска сервера (если не отключен)
+    const disableBot = process.env.DISABLE_BOT === 'true';
+    if (!disableBot) {
+        // Даем серверу время на запуск, затем запускаем бота
+        setTimeout(() => {
+            console.log('🤖 Starting Telegram bot after server initialization...');
+            try {
+                require('./bot-runner');
+            } catch (error: any) {
+                console.error('⚠️ Failed to start Telegram bot:', error.message);
+                console.log('   Bot will not be available, but server is running.');
+            }
+        }, 3000); // 3 секунды на запуск сервера
+    } else {
+        console.log('⏭️ Telegram bot disabled (DISABLE_BOT=true)');
+    }
 };
 
 startServer();
