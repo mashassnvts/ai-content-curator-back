@@ -13,8 +13,10 @@ import { getPendingAction, setPendingAction, clearPendingAction } from './utils/
 
 dotenv.config();
 
+import { getApiUrl } from './utils/api-url';
+
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const API_URL = process.env.API_URL || 'http://localhost:5000';
+const API_URL = getApiUrl();
 const HELP_TEXT =
     'ℹ️ *Как пользоваться ботом*\n\n' +
     '📋 *Управление интересами:*\n' +
@@ -288,10 +290,27 @@ bot.on('callback_query', async (query) => {
     await bot.answerCallbackQuery(query.id);
 });
 
+// Глобальная обработка ошибок бота
+bot.on('polling_error', (error: any) => {
+    console.error('⚠️ Telegram bot polling error:', error.message);
+    console.log('   Bot will continue running...');
+});
+
+bot.on('error', (error: any) => {
+    console.error('⚠️ Telegram bot error:', error.message);
+    console.log('   Bot will continue running...');
+});
+
+// Обработка необработанных ошибок
+process.on('unhandledRejection', (reason: any, promise) => {
+    console.error('⚠️ Unhandled Rejection in bot:', reason);
+    console.log('   Process will continue running...');
+});
+
 checkServerAvailability().then(() => {
     console.log('🤖 Telegram bot is running and ready to receive messages!');
 }).catch((error) => {
-    console.error('Error checking server availability:', error);
-    console.log('🤖 Telegram bot is running, but server check failed.');
+    console.error('⚠️ Error checking server availability:', error.message);
+    console.log('   Bot will still start, but API requests may fail.');
 });
 

@@ -167,7 +167,8 @@ class BotUserService {
                     .filter((id): id is number => typeof id === 'number');
                 
                 // Синхронизируем через API (если есть доступ к API_URL)
-                const API_URL = process.env.API_URL || 'http://localhost:5000';
+                const { getApiUrl } = await import('../utils/api-url');
+                const API_URL = getApiUrl();
                 // Для синхронизации нужно использовать внутренний вызов UserService
                 const UserService = (await import('../../services/user.service')).default;
                 await UserService.setActiveInterests(profile.user_id, activeInterestIds);
