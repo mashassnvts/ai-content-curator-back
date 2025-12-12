@@ -90,7 +90,7 @@ const processSingleUrlAnalysis = async (url: string, interests: string, feedback
                             const userLevel = userLevels.find(ul => ul.interest.toLowerCase() === interest.toLowerCase());
                             return userLevel ? { interest, userLevel: userLevel.level } : null;
                         })
-                        .filter((item): item is { interest: string; userLevel: string } => item !== null);
+                        .filter((item): item is { interest: string; userLevel: 'novice' | 'amateur' | 'professional' } => item !== null);
 
                     if (interestsWithLevels.length > 0) {
                         try {
