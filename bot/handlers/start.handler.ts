@@ -4,7 +4,8 @@ import axios from 'axios';
 import botUserService from '../services/bot-user.service';
 import { promptModeSelection } from './mode.handler';
 
-const API_URL = process.env.API_URL || 'http://localhost:5000';
+import { getApiUrl } from '../utils/api-url';
+const API_URL = getApiUrl();
 
 export const handleStart = async (bot: TelegramBot, msg: Message) => {
     const chatId = msg.chat.id;

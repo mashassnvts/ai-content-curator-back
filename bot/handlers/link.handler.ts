@@ -2,7 +2,8 @@ import TelegramBot, { Message } from 'node-telegram-bot-api';
 import axios from 'axios';
 import { MAIN_MENU_MARKUP } from '../utils/menu'; // Импортируем меню
 
-const API_URL = process.env.API_URL || 'http://localhost:5000';
+import { getApiUrl } from '../utils/api-url';
+const API_URL = getApiUrl();
 const LINK_CODE_REGEX = /^[A-F0-9]{6}$/i;
 
 interface LinkPayload {

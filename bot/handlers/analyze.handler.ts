@@ -5,7 +5,8 @@ import { formatAnalysisResult, formatAnalysisResultPlain } from '../utils/format
 import botUserService from '../services/bot-user.service';
 import { MAIN_MENU_MARKUP } from '../utils/menu';
 
-const API_URL = process.env.API_URL || 'http://localhost:5000';
+import { getApiUrl } from '../utils/api-url';
+const API_URL = getApiUrl();
 const GUEST_NOTE =
     'ℹ️ Вы используете гостевой режим. Чтобы синхронизировать интересы с веб-приложением, используйте /mode или /link.';
 const URL_REGEX_GLOBAL = /(https?:\/\/[^\s]+)/gi;

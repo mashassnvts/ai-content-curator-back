@@ -140,9 +140,16 @@ const startServer = async () => {
         setTimeout(() => {
             console.log('🤖 Starting Telegram bot after server initialization...');
             try {
-                require('./bot-runner');
+                // Загружаем бота асинхронно, чтобы ошибки не останавливали сервер
+                import('./bot-runner').catch((error: any) => {
+                    console.error('⚠️ Failed to start Telegram bot:', error.message);
+                    if (error.stack) {
+                        console.error('   Stack:', error.stack);
+                    }
+                    console.log('   Bot will not be available, but server is running.');
+                });
             } catch (error: any) {
-                console.error('⚠️ Failed to start Telegram bot:', error.message);
+                console.error('⚠️ Failed to load Telegram bot:', error.message);
                 console.log('   Bot will not be available, but server is running.');
             }
         }, 3000); // 3 секунды на запуск сервера

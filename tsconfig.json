@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ES6",
     "module": "commonjs",
-    "lib": [ "ES2020", "DOM" ],
+    "lib": ["ES2020", "DOM"],
     "outDir": "./dist",
     "rootDir": "./",
     "strict": true,
@@ -27,5 +27,5 @@
     "types/**/*.ts",
     "bot/**/*.ts"
   ],
-  "exclude": [ "node_modules" ]
+  "exclude": ["node_modules"]
 }

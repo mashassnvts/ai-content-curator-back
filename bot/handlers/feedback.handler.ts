@@ -2,7 +2,8 @@ import TelegramBot from 'node-telegram-bot-api';
 import { CallbackQuery } from 'node-telegram-bot-api';
 import axios from 'axios';
 
-const API_URL = process.env.API_URL || 'http://localhost:5000';
+import { getApiUrl } from '../utils/api-url';
+const API_URL = getApiUrl();
 
 export const handleFeedback = async (bot: TelegramBot, query: CallbackQuery) => {
     const chatId = query.message?.chat.id;
