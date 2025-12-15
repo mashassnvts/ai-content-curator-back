@@ -104,7 +104,16 @@ class UserController {
                 return res.status(401).json({ message: 'Unauthorized' });
             }
             const interests = await UserService.getInterests(userId);
-            return res.status(200).json(interests);
+            // Явно маппим чтобы убедиться что isActive включен
+            const mappedInterests = interests.map(interest => ({
+                id: interest.id,
+                interest: interest.interest,
+                isActive: interest.isActive !== undefined ? interest.isActive : true, // По умолчанию true для старых записей
+                lastUsedAt: interest.lastUsedAt,
+                createdAt: interest.createdAt,
+                updatedAt: interest.updatedAt
+            }));
+            return res.status(200).json(mappedInterests);
         } catch (error) {
             return res.status(500).json({ message: 'Server error', error });
         }

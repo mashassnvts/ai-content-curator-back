@@ -59,30 +59,78 @@ class UserService {
     }
 
     async updateInterests(userId: number, interests: string[] | Array<{interest: string, level?: string}>): Promise<UserInterest[]> {
-        await UserInterest.destroy({ where: { userId } });
-        await UserInterestLevel.destroy({ where: { userId } }); // Удаляем старые уровни
-        
+        // НЕ удаляем все интересы! Сохраняем isActive для существующих
         const now = new Date();
         const validLevels = ['novice', 'amateur', 'professional'];
         
-        const interestPromises = interests.map(async (item) => {
-            // Поддержка двух форматов: строки или объекты
+        // Получаем существующие интересы с их isActive
+        const existingInterests = await UserInterest.findAll({ where: { userId } });
+        const existingInterestsMap = new Map<string, UserInterest>();
+        existingInterests.forEach(interest => {
+            existingInterestsMap.set(interest.interest.toLowerCase().trim(), interest);
+        });
+        
+        // Определяем какие интересы нужно удалить (те что не в новом списке)
+        const newInterestNames = interests.map(item => {
             const interestText = typeof item === 'string' ? item : item.interest;
-            const level = typeof item === 'object' && item.level ? item.level : 'novice'; // По умолчанию novice
+            return interestText.toLowerCase().trim();
+        });
+        const toDelete = existingInterests.filter(interest => 
+            !newInterestNames.includes(interest.interest.toLowerCase().trim())
+        );
+        
+        // Удаляем только те интересы, которых нет в новом списке
+        if (toDelete.length > 0) {
+            await UserInterest.destroy({ 
+                where: { 
+                    userId,
+                    id: toDelete.map(i => i.id)
+                } 
+            });
+            // Удаляем уровни для удаленных интересов
+            await UserInterestLevel.destroy({
+                where: {
+                    userId,
+                    interest: toDelete.map(i => i.interest.toLowerCase().trim())
+                }
+            });
+        }
+        
+        // Обновляем или создаем интересы, сохраняя isActive для существующих
+        const interestPromises = interests.map(async (item) => {
+            const interestText = typeof item === 'string' ? item : item.interest;
+            const level = typeof item === 'object' && item.level ? item.level : 'novice';
+            const interestKey = interestText.toLowerCase().trim();
             
-            // Создаем интерес
-            const interest = await UserInterest.create({ userId, interest: interestText, lastUsedAt: now });
+            // Проверяем существует ли интерес
+            const existing = existingInterestsMap.get(interestKey);
+            let interestRecord: UserInterest;
             
-            // Создаем уровень, если указан валидный уровень
+            if (existing) {
+                // Обновляем существующий - СОХРАНЯЕМ isActive!
+                existing.lastUsedAt = now;
+                await existing.save();
+                interestRecord = existing;
+            } else {
+                // Создаем новый с isActive=true
+                interestRecord = await UserInterest.create({ 
+                    userId, 
+                    interest: interestText, 
+                    isActive: true, 
+                    lastUsedAt: now 
+                });
+            }
+            
+            // Обновляем или создаем уровень
             if (validLevels.includes(level)) {
                 await UserInterestLevel.findOrCreate({
                     where: {
                         userId,
-                        interest: interestText.toLowerCase().trim(),
+                        interest: interestKey,
                     },
                     defaults: {
                         userId,
-                        interest: interestText.toLowerCase().trim(),
+                        interest: interestKey,
                         level: level as 'novice' | 'amateur' | 'professional',
                     },
                 }).then(([userLevel, created]) => {
@@ -93,11 +141,11 @@ class UserService {
                 });
             }
             
-            return interest;
+            return interestRecord;
         });
         
-        const newInterests = await Promise.all(interestPromises);
-        return newInterests;
+        const updatedInterests = await Promise.all(interestPromises);
+        return updatedInterests;
     }
     
     /**
@@ -117,8 +165,11 @@ class UserService {
         
         let interestRecord: UserInterest;
         if (existingInterest) {
-            // Обновляем lastUsedAt
+            // Обновляем lastUsedAt, сохраняем isActive (если не установлен - ставим true)
             existingInterest.lastUsedAt = now;
+            if (existingInterest.isActive === undefined || existingInterest.isActive === null) {
+                existingInterest.isActive = true;
+            }
             await existingInterest.save();
             interestRecord = existingInterest;
         } else {
@@ -126,6 +177,7 @@ class UserService {
             interestRecord = await UserInterest.create({
                 userId,
                 interest: interest.trim(),
+                isActive: true,
                 lastUsedAt: now,
             });
         }
@@ -166,49 +218,29 @@ class UserService {
     }
 
     async getActiveInterests(userId: number): Promise<number[]> {
-        // Получаем все интересы пользователя
-        const interests = await UserInterest.findAll({ where: { userId } });
+        // Получаем только активные интересы пользователя из БД
+        const activeInterests = await UserInterest.findAll({ 
+            where: { 
+                userId,
+                isActive: true 
+            } 
+        });
         
-        // Ищем BotProfile для этого пользователя (если есть linked telegram)
-        const botProfile = await BotProfile.findOne({ where: { user_id: userId } });
-        
-        if (botProfile && botProfile.guest_active_interests) {
-            // Если есть сохраненные активные интересы в BotProfile
-            const savedActive = JSON.parse(botProfile.guest_active_interests);
-            // Фильтруем только те ID, которые существуют
-            const interestIds = interests.map(i => i.id);
-            return savedActive
-                .map((interestName: string) => {
-                    const interest = interests.find(i => i.interest === interestName);
-                    return interest?.id;
-                })
-                .filter((id: number | undefined): id is number => typeof id === 'number');
-        }
-        
-        // По умолчанию все интересы активны
-        return interests.map(i => i.id);
+        return activeInterests.map(i => i.id);
     }
 
     async setActiveInterests(userId: number, interestIds: number[]): Promise<void> {
-        // Получаем интересы пользователя
-        const interests = await UserInterest.findAll({ where: { userId } });
+        // Получаем все интересы пользователя
+        const allInterests = await UserInterest.findAll({ where: { userId } });
         
-        // Проверяем, что все ID существуют
-        const validIds = interestIds.filter(id => interests.some(i => i.id === id));
-        
-        // Получаем названия активных интересов
-        const activeInterestNames = interests
-            .filter(i => validIds.includes(i.id))
-            .map(i => i.interest);
-        
-        // Обновляем BotProfile для синхронизации с ботом
-        const botProfile = await BotProfile.findOne({ where: { user_id: userId } });
-        if (botProfile) {
-            await botProfile.update({ guest_active_interests: JSON.stringify(activeInterestNames) });
-        } else {
-            // Если BotProfile не существует, создаем его (на случай, если пользователь еще не использовал бота)
-            // Но для этого нужен telegram_id, поэтому просто пропускаем
-        }
+        // Обновляем статус is_active для каждого интереса
+        await Promise.all(
+            allInterests.map(interest => 
+                interest.update({ 
+                    isActive: interestIds.includes(interest.id) 
+                })
+            )
+        );
     }
 }
 

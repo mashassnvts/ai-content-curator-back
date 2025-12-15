@@ -103,6 +103,30 @@ const startServer = async () => {
         await sequelize.sync({ alter: true, logging: false });
         console.log('✅ Database models synchronized successfully.');
         
+        // Создаем индекс на telegramId вручную (если колонка существует)
+        try {
+            const queryInterface = sequelize.getQueryInterface();
+            const tableDescription = await queryInterface.describeTable('analysis_history');
+            if (tableDescription.telegram_id && !tableDescription.telegram_id.primaryKey) {
+                // Проверяем существует ли индекс
+                const indexes: any[] = await queryInterface.showIndex('analysis_history') as any[];
+                const hasIndex = indexes.some((idx: any) => 
+                    idx.fields && Array.isArray(idx.fields) && 
+                    idx.fields.some((f: any) => f.attribute === 'telegram_id' || f === 'telegram_id')
+                );
+                if (!hasIndex) {
+                    await queryInterface.addIndex('analysis_history', ['telegram_id'], {
+                        name: 'analysis_history_telegram_id',
+                        concurrently: false
+                    });
+                    console.log('✅ Created index on telegram_id');
+                }
+            }
+        } catch (indexError: any) {
+            // Игнорируем ошибки создания индекса (колонка может еще не существовать)
+            console.log('ℹ️ Index on telegram_id will be created after column is added');
+        }
+        
         // Проверяем, что таблицы созданы
         const tables = await sequelize.getQueryInterface().showAllTables();
         console.log(`📋 Found ${tables.length} table(s) in database:`, tables);

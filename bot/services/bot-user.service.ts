@@ -226,7 +226,8 @@ class BotUserService {
                     // Создаем интерес
                     const interestRecord = await UserInterest.create({ 
                         userId: profile.user_id, 
-                        interest: value, 
+                        interest: value,
+                        isActive: true,
                         lastUsedAt: now 
                     });
                     
@@ -367,135 +368,78 @@ class BotUserService {
             reasoning?: string;
         },
         userId?: number | null
-    ): Promise<BotAnalysisHistory> {
-        // Сохраняем в BotAnalysisHistory
-        const botHistory = await BotAnalysisHistory.create({
-            telegram_id: telegramId,
-            url,
-            interests,
-            sourceType: result.sourceType || '',
-            score: result.score || 0,
-            verdict: result.verdict || '',
-            summary: result.summary || '',
-            reasoning: result.reasoning || '',
-            user_id: userId || null,
-        });
+    ): Promise<any> {
+        // Сохраняем в единую таблицу AnalysisHistory
+        try {
+            const AnalysisHistory = (await import('../../models/AnalysisHistory')).default;
+            const history = await AnalysisHistory.create({
+                userId: userId || null,
+                telegramId,
+                url,
+                interests,
+                sourceType: result.sourceType || '',
+                score: result.score || 0,
+                verdict: result.verdict || '',
+                summary: result.summary || '',
+                reasoning: result.reasoning || '',
+            });
 
-        // Если пользователь linked, также сохраняем в AnalysisHistory для синхронизации с веб-приложением
-        if (userId) {
-            try {
-                const AnalysisHistory = (await import('../../models/AnalysisHistory')).default;
-                await AnalysisHistory.create({
-                    userId,
-                    url,
-                    interests,
-                    sourceType: result.sourceType || '',
-                    score: result.score || 0,
-                    verdict: result.verdict || '',
-                    summary: result.summary || '',
-                    reasoning: result.reasoning || '',
-                });
-            } catch (error) {
-                console.error('Error saving to AnalysisHistory:', error);
-                // Не прерываем выполнение, если не удалось сохранить в AnalysisHistory
+            // Обновляем lastUsedAt для использованных интересов (только для linked пользователей)
+            if (userId) {
+                const interestsList = interests.split(',').map(i => i.trim());
+                await historyCleanupService.updateInterestUsage(userId, interestsList);
             }
 
-            // Обновляем lastUsedAt для использованных интересов
-            const interestsList = interests.split(',').map(i => i.trim());
-            await historyCleanupService.updateInterestUsage(userId, interestsList);
+            return history;
+        } catch (error) {
+            console.error('Error saving to AnalysisHistory:', error);
+            throw error;
         }
-
-        return botHistory;
     }
 
     async getAnalysisHistory(telegramId: string, limit?: number): Promise<any[]> {
         const profile = await this.getOrCreateProfile(telegramId);
         
         try {
-            // Для linked пользователей объединяем историю из BotAnalysisHistory и AnalysisHistory
-            if (profile.mode === 'linked' && profile.user_id) {
-                const [botHistory, webHistory] = await Promise.all([
-                    BotAnalysisHistory.findAll({
-                        where: { telegram_id: telegramId },
-                        order: [['createdAt', 'DESC']],
-                    }),
-                    (async () => {
-                        try {
-                            if (!profile.user_id) return [];
-                            const AnalysisHistory = (await import('../../models/AnalysisHistory')).default;
-                            return await AnalysisHistory.findAll({
-                                where: { userId: profile.user_id },
-                                order: [['createdAt', 'DESC']],
-                            });
-                        } catch (error) {
-                            console.error('Error loading web history:', error);
-                            return [];
-                        }
-                    })()
-                ]);
-                
-                console.log(`[BotHistory] Loaded ${botHistory.length} bot records and ${webHistory.length} web records for user ${profile.user_id}`);
-                
-                // Объединяем и сортируем по дате
-                // Используем уникальные ID: для bot истории добавляем префикс 'bot_', для web - 'web_'
-                const combined: Array<{ id: string; originalId: number; createdAt: Date; [key: string]: any }> = [
-                    ...botHistory.map((item, idx) => {
-                        const plain = item.get({ plain: true }) as any;
-                        return {
-                            ...plain,
-                            id: `bot_${plain.id}`, // Уникальный ID для bot истории
-                            originalId: plain.id,
-                            createdAt: plain.createdAt || new Date(),
-                            source: 'bot' as const
-                        };
-                    }),
-                    ...webHistory.map((item, idx) => {
-                        const plain = item.get({ plain: true }) as any;
-                        return {
-                            id: `web_${plain.id}`, // Уникальный ID для web истории
-                            originalId: plain.id,
-                            telegram_id: telegramId,
-                            url: plain.url,
-                            interests: plain.interests || '',
-                            sourceType: plain.sourceType,
-                            score: plain.score,
-                            verdict: plain.verdict,
-                            summary: plain.summary,
-                            reasoning: plain.reasoning,
-                            user_id: profile.user_id || null,
-                            createdAt: plain.createdAt || new Date(),
-                            updatedAt: plain.updatedAt,
-                            source: 'web' as const
-                        };
-                    })
-                ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-                
-                // Применяем лимит только если он указан
-                const limited = limit && limit > 0 ? combined.slice(0, limit) : combined;
-                console.log(`[BotHistory] Combined ${limited.length} records${limit ? ` (limited to ${limit})` : ' (no limit)'}`);
-                return limited;
-            }
+            const AnalysisHistory = (await import('../../models/AnalysisHistory')).default;
+            const { Op } = await import('sequelize');
             
-            // Для guest пользователей только BotAnalysisHistory
-            const findAllOptions: any = {
-                where: { telegram_id: telegramId },
+            // Получаем всю историю из единой таблицы AnalysisHistory
+            // Для linked пользователей - по userId, для guest - по telegramId
+            const whereClause = profile.mode === 'linked' && profile.user_id 
+                ? { userId: profile.user_id }
+                : { telegramId: telegramId };
+            
+            const history = await AnalysisHistory.findAll({
+                where: whereClause,
                 order: [['createdAt', 'DESC']],
-            };
-            if (limit && limit > 0) {
-                findAllOptions.limit = limit;
-            }
-            const guestHistory = await BotAnalysisHistory.findAll(findAllOptions);
+                limit: limit || undefined,
+            });
             
-            console.log(`[BotHistory] Loaded ${guestHistory.length} records for guest user ${telegramId}`);
-            return guestHistory.map((item, idx) => {
-                const plain = item.get({ plain: true });
+            console.log(`[BotHistory] Loaded ${history.length} records for ${profile.mode === 'linked' ? `user ${profile.user_id}` : `telegram ${telegramId}`}`);
+            
+            // Преобразуем в нужный формат
+            const combined = history.map((item) => {
+                const plain = item.get({ plain: true }) as any;
                 return {
                     ...plain,
-                    id: `bot_${plain.id}`, // Уникальный ID для совместимости
-                    originalId: plain.id,
-                    source: 'bot' as const
+                    id: plain.id,
+                    telegram_id: plain.telegramId || telegramId,
+                    url: plain.url,
+                    interests: plain.interests || '',
+                    sourceType: plain.sourceType,
+                    score: plain.score,
+                    verdict: plain.verdict,
+                    summary: plain.summary,
+                    reasoning: plain.reasoning,
+                    user_id: plain.userId || null,
+                    createdAt: plain.createdAt || new Date(),
+                    updatedAt: plain.updatedAt,
+                    source: plain.telegramId ? 'bot' as const : 'web' as const
                 };
             });
+                
+            return combined;
         } catch (error) {
             console.error('[BotHistory] Error loading history:', error);
             return [];

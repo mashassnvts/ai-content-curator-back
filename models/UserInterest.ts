@@ -6,6 +6,7 @@ interface UserInterestAttributes {
     id: number;
     userId: number;
     interest: string;
+    isActive: boolean;
     lastUsedAt?: Date | null;
 }
 
@@ -15,6 +16,7 @@ class UserInterest extends Model<UserInterestAttributes, UserInterestCreationAtt
     public id!: number;
     public userId!: number;
     public interest!: string;
+    public isActive!: boolean;
     public lastUsedAt?: Date | null;
 
     public readonly createdAt!: Date;
@@ -38,6 +40,12 @@ UserInterest.init({
     interest: {
         type: DataTypes.STRING,
         allowNull: false,
+    },
+    isActive: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: true,
+        field: 'is_active',
     },
     lastUsedAt: {
         type: DataTypes.DATE,
