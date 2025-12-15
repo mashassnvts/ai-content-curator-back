@@ -4,7 +4,8 @@ import User from './User';
 
 interface AnalysisHistoryAttributes {
     id: number;
-    userId: number;
+    userId: number | null;
+    telegramId: string | null;
     url: string;
     interests: string;
     sourceType: string;
@@ -18,7 +19,8 @@ interface AnalysisHistoryCreationAttributes extends Optional<AnalysisHistoryAttr
 
 class AnalysisHistory extends Model<AnalysisHistoryAttributes, AnalysisHistoryCreationAttributes> implements AnalysisHistoryAttributes {
     public id!: number;
-    public userId!: number;
+    public userId!: number | null;
+    public telegramId!: string | null;
     public url!: string;
     public interests!: string;
     public sourceType!: string;
@@ -40,11 +42,16 @@ AnalysisHistory.init(
         },
         userId: {
             type: DataTypes.INTEGER,
-            allowNull: false,
+            allowNull: true,
             references: {
                 model: User,
                 key: 'id',
             },
+        },
+        telegramId: {
+            type: DataTypes.STRING,
+            allowNull: true,
+            field: 'telegram_id',
         },
         url: {
             type: DataTypes.STRING,
@@ -79,6 +86,12 @@ AnalysisHistory.init(
         tableName: 'analysis_history',
         sequelize,
         timestamps: true,
+        indexes: [
+            { fields: ['userId'] },
+            // Временно убрали индекс - Sequelize создаст его после добавления колонки через SQL
+            // { fields: ['telegramId'] },
+            { fields: ['createdAt'] },
+        ],
     }
 );
 

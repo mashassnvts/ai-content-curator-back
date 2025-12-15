@@ -331,6 +331,7 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             if (successfulResults.length > 0) {
                 const historyCreationPromises = successfulResults.map(result => AnalysisHistory.create({
                     userId,
+                    telegramId: null, // Для веб-приложения telegramId всегда null
                     url: result.originalUrl,
                     sourceType: result.sourceType,
                     score: result.score,

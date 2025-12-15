@@ -108,13 +108,11 @@ export const handleAnalyze = async (bot: TelegramBot, msg: Message) => {
     let statusMessageIndex = 0;
     let processedCount = 0;
 
-    // Запускаем обновление статуса каждые 3 секунды
-    if (urls.length > 1) {
-        statusUpdateInterval = setInterval(async () => {
-            statusMessageIndex++;
-            await updateStatusMessage(bot, chatId, statusMessage.message_id, statusMessageIndex, urls.length, processedCount);
-        }, 3000);
-    }
+    // Запускаем обновление статуса каждые 3-5 секунд для всех случаев
+    statusUpdateInterval = setInterval(async () => {
+        statusMessageIndex++;
+        await updateStatusMessage(bot, chatId, statusMessage.message_id, statusMessageIndex, urls.length, processedCount);
+    }, 3000 + Math.random() * 2000); // 3-5 секунд
 
     try {
         // Обрабатываем каждую ссылку отдельно для показа результатов по мере готовности
@@ -124,12 +122,6 @@ export const handleAnalyze = async (bot: TelegramBot, msg: Message) => {
             const url = urls[i];
             
             try {
-                // Обновляем статус перед обработкой каждой ссылки
-                if (urls.length > 1) {
-                    statusMessageIndex++;
-                    await updateStatusMessage(bot, chatId, statusMessage.message_id, statusMessageIndex, urls.length, processedCount);
-                }
-
                 const response = await axios.post(`${API_URL}/api/analysis/guest-analyze`, {
                     urls: url,
                     interests: interestsString,
