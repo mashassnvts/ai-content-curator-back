@@ -81,7 +81,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
             setTimeout(() => reject(new Error('Embedding generation timed out.')), 30000)
         );
 
-        let embedding: number[];
+        let embedding: number[] | undefined;
 
         // Используем Gemini Embedding API
         // Модель: gemini-embedding-001 (размерность по умолчанию: 3072, можно уменьшить до 768)
@@ -98,12 +98,11 @@ export async function generateEmbedding(text: string): Promise<number[]> {
                             contents: text
                         });
                     } catch (simpleError: any) {
-                        // Если простой формат не работает, пробуем с параметрами
-                        console.log(`⚠️ [generateEmbedding] Simple format failed, trying with parameters: ${simpleError.message}`);
+                        // Если простой формат не работает, пробуем с массивом
+                        console.log(`⚠️ [generateEmbedding] Simple format failed, trying array: ${simpleError.message}`);
                         result = await genAI.models.embedContent({
                             model: 'gemini-embedding-001',
-                            contents: [text], // Массив строк
-                            taskType: 'RETRIEVAL_DOCUMENT'
+                            contents: text
                         });
                     }
                     return result;
@@ -143,25 +142,24 @@ export async function generateEmbedding(text: string): Promise<number[]> {
             throw new Error('Unexpected embedding response format');
         }
 
-        if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
-            throw new Error('Invalid embedding format');
-        }
+        const validEmbedding: number[] = embedding;
 
         // Gemini embedding-001 по умолчанию возвращает 3072 измерения
-        // Можно использовать outputDimensionality: 768 для уменьшения
         // Для совместимости с pgvector (vector(768)) обрезаем до 768, если больше
         const targetDimension = 768;
-        if (embedding.length > targetDimension) {
-            console.log(`📊 [generateEmbedding] Truncating embedding from ${embedding.length} to ${targetDimension} dimensions`);
-            embedding = embedding.slice(0, targetDimension);
-        } else if (embedding.length < targetDimension) {
-            console.warn(`⚠️ [generateEmbedding] Embedding dimension is ${embedding.length}, expected at least ${targetDimension}`);
-            // Дополняем нулями, если меньше (не должно происходить с Gemini)
-            embedding = [...embedding, ...new Array(targetDimension - embedding.length).fill(0)];
+        let finalEmbedding: number[];
+        if (validEmbedding.length > targetDimension) {
+            console.log(`📊 [generateEmbedding] Truncating embedding from ${validEmbedding.length} to ${targetDimension} dimensions`);
+            finalEmbedding = validEmbedding.slice(0, targetDimension);
+        } else if (validEmbedding.length < targetDimension) {
+            console.warn(`⚠️ [generateEmbedding] Embedding dimension is ${validEmbedding.length}, expected at least ${targetDimension}`);
+            finalEmbedding = [...validEmbedding, ...new Array(targetDimension - validEmbedding.length).fill(0)];
+        } else {
+            finalEmbedding = validEmbedding;
         }
 
-        console.log(`✅ [generateEmbedding] Generated embedding (dimension: ${embedding.length})`);
-        return embedding;
+        console.log(`✅ [generateEmbedding] Generated embedding (dimension: ${finalEmbedding.length})`);
+        return finalEmbedding;
 
     } catch (error: any) {
         const errorMessage = error.message || String(error);

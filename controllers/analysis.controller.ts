@@ -537,7 +537,7 @@ const processSingleUrlAnalysis = async (
         
         // Сохраняем результат анализа в историю и генерируем эмбеддинг (если пользователь авторизован)
         let analysisHistoryId: number | undefined = undefined;
-        if (userId && !analysisResult.error) {
+        if (userId && analysisResult?.summary) {
             try {
                 const historyRecord = await AnalysisHistory.create({
                     userId,
