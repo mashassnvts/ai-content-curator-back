@@ -196,5 +196,57 @@ class UserController {
             return res.status(500).json({ message: 'Server error', error });
         }
     }
+
+    /**
+     * Получает семантические теги пользователя (для "облака смыслов")
+     * GET /api/profile/tags?limit=20&sortBy=weight
+     * 
+     * Query параметры:
+     * - limit (number, опционально) - максимальное количество тегов для возврата
+     * - sortBy ('weight' | 'date', опционально) - способ сортировки: по весу (важности) или по дате использования
+     * 
+     * Важно: Семантические теги (темы) - это НЕ интересы пользователя!
+     * - Интересы: пользователь сам выбирает категории (например, "AI", "программирование")
+     * - Теги: AI автоматически извлекает темы из проанализированных статей (например, "нейронные сети", "оптимизация")
+     * Теги накапливаются в "облаке смыслов" на основе того, какие статьи пользователь анализировал.
+     */
+    async getSemanticTags(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
+        try {
+            const userId = req.user?.userId;
+            if (!userId) {
+                return res.status(401).json({ message: 'Unauthorized' });
+            }
+            
+            // Парсим query-параметры
+            const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : undefined;
+            const sortBy = req.query.sortBy === 'date' ? 'date' : 'weight';
+            
+            // Валидация limit
+            if (limit !== undefined && (isNaN(limit) || limit < 1 || limit > 1000)) {
+                return res.status(400).json({ 
+                    message: 'Invalid limit parameter. Must be a number between 1 and 1000.' 
+                });
+            }
+            
+            const tags = await UserService.getSemanticTags(userId, { limit, sortBy });
+            
+            // Форматируем ответ для удобства использования на фронтенде
+            const formattedTags = tags.map(tag => ({
+                id: tag.id,
+                tag: tag.tag,
+                weight: parseFloat(tag.weight.toString()),
+                lastUsedAt: tag.lastUsedAt,
+                createdAt: tag.createdAt,
+                updatedAt: tag.updatedAt,
+            }));
+            
+            return res.status(200).json({
+                tags: formattedTags,
+                count: formattedTags.length,
+            });
+        } catch (error) {
+            return res.status(500).json({ message: 'Server error', error });
+        }
+    }
 }
 export default new UserController();

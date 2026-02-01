@@ -13,6 +13,7 @@ interface AnalysisHistoryAttributes {
     verdict: string;
     summary: string;
     reasoning: string;
+    embedding?: string | null; // Вектор эмбеддинга (хранится как TEXT, но используется как vector в SQL)
 }
 
 interface AnalysisHistoryCreationAttributes extends Optional<AnalysisHistoryAttributes, 'id'> {}
@@ -28,6 +29,7 @@ class AnalysisHistory extends Model<AnalysisHistoryAttributes, AnalysisHistoryCr
     public verdict!: string;
     public summary!: string;
     public reasoning!: string;
+    public embedding?: string | null;
 
     public readonly createdAt!: Date;
     public readonly updatedAt!: Date;
@@ -80,6 +82,11 @@ AnalysisHistory.init(
         reasoning: {
             type: DataTypes.TEXT,
             allowNull: true,
+        },
+        embedding: {
+            type: DataTypes.TEXT, // Sequelize не поддерживает vector напрямую, используем TEXT
+            allowNull: true,
+            comment: 'Vector embedding for semantic search (pgvector)',
         },
     },
     {

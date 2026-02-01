@@ -2,6 +2,7 @@ import User from '../models/User';
 import UserInterest from '../models/UserInterest';
 import UserInterestLevel from '../models/UserInterestLevel';
 import UserFeedback from '../models/UserFeedback'; // Import UserFeedback model
+import UserSemanticTag from '../models/UserSemanticTag';
 import BotProfile from '../models/BotProfile';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -241,6 +242,35 @@ class UserService {
                 })
             )
         );
+    }
+
+    /**
+     * Получает семантические теги пользователя (для "облака смыслов")
+     * @param userId - ID пользователя
+     * @param options - Опции для фильтрации и сортировки
+     * @param options.limit - Максимальное количество тегов (по умолчанию без ограничений)
+     * @param options.sortBy - Способ сортировки: 'weight' (по весу) или 'date' (по дате использования)
+     * @returns Массив семантических тегов пользователя
+     */
+    async getSemanticTags(
+        userId: number, 
+        options?: { limit?: number; sortBy?: 'weight' | 'date' }
+    ): Promise<UserSemanticTag[]> {
+        const orderBy = options?.sortBy === 'date' 
+            ? [['lastUsedAt', 'DESC'], ['weight', 'DESC']]
+            : [['weight', 'DESC'], ['lastUsedAt', 'DESC']];
+        
+        const queryOptions: any = {
+            where: { userId },
+            order: orderBy,
+        };
+        
+        if (options?.limit && options.limit > 0) {
+            queryOptions.limit = options.limit;
+        }
+        
+        const tags = await UserSemanticTag.findAll(queryOptions);
+        return tags;
     }
 }
 

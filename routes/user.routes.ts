@@ -13,6 +13,7 @@ router.post('/interests', authMiddleware, UserController.updateInterests);
 router.post('/interests/add', authMiddleware, UserController.addInterest);
 router.get('/active-interests', authMiddleware, UserController.getActiveInterests);
 router.post('/active-interests', authMiddleware, UserController.setActiveInterests);
+router.get('/profile/tags', authMiddleware, UserController.getSemanticTags);
 
 
 export default router;

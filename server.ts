@@ -14,6 +14,7 @@ import './models/BotProfile';
 import './models/BotAnalysisHistory';
 import './models/UserInterestLevel';
 import './models/ContentRelevanceScore';
+import './models/UserSemanticTag';
 import historyCleanupService from './services/history-cleanup.service';
 
 dotenv.config();
@@ -100,8 +101,32 @@ const startServer = async () => {
         
         console.log('📊 Synchronizing database models...');
         // Используем alter: true для создания недостающих таблиц и обновления существующих
-        await sequelize.sync({ alter: true, logging: false });
-        console.log('✅ Database models synchronized successfully.');
+        // НО: не создаем индексы для vector полей (они создаются вручную через SQL)
+        try {
+            await sequelize.sync({ alter: true, logging: false });
+            console.log('✅ Database models synchronized successfully.');
+        } catch (syncError: any) {
+            // Если ошибка связана с vector индексом - игнорируем (индекс создается вручную)
+            if (syncError.message && syncError.message.includes('vector_cosine_ops')) {
+                console.warn('⚠️ Database sync warning (vector index):', syncError.message);
+                console.log('💡 Vector indexes should be created manually via SQL');
+                console.log('✅ Database models synchronized (vector index skipped)');
+            } else {
+                throw syncError;
+            }
+        }
+        
+        // Проверяем, что расширение vector установлено
+        try {
+            const [results] = await sequelize.query("SELECT 1 FROM pg_extension WHERE extname = 'vector' LIMIT 1") as any[];
+            if (results && results.length > 0) {
+                console.log('✅ pgvector extension is installed');
+            } else {
+                console.warn('⚠️ pgvector extension is not installed. Run: CREATE EXTENSION vector;');
+            }
+        } catch (error: any) {
+            console.warn('⚠️ pgvector extension check failed:', error.message);
+        }
         
         // Создаем индекс на telegramId вручную (если колонка существует)
         try {
