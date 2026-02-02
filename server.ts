@@ -32,10 +32,13 @@ const PORT = parseInt(process.env.PORT || '5000', 10);
 
 // Получаем список разрешенных origin из переменной окружения
 const allowedOrigins = process.env.CORS_ORIGIN 
-    ? process.env.CORS_ORIGIN.split(',').map((origin: string) => origin.trim())
+    ? process.env.CORS_ORIGIN.split(',').map((origin: string) => origin.trim()).filter(Boolean)
     : ['http://localhost:3000', 'http://127.0.0.1:3000'];
 
-console.log('🌐 CORS allowed origins:', allowedOrigins);
+// Vercel preview/production домены (*.vercel.app)
+const isVercelOrigin = (origin: string) => origin.endsWith('.vercel.app');
+
+console.log('🌐 CORS allowed origins:', allowedOrigins, '+ *.vercel.app');
 
 const corsOptions = {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
@@ -44,8 +47,8 @@ const corsOptions = {
             return callback(null, true);
         }
         
-        // Проверяем, есть ли origin в списке разрешенных
-        if (allowedOrigins.includes(origin)) {
+        // Разрешаем Vercel-домены и список из CORS_ORIGIN
+        if (allowedOrigins.includes(origin) || isVercelOrigin(origin)) {
             callback(null, true);
         } else {
             console.warn(`⚠️ CORS blocked origin: ${origin}`);
