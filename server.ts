@@ -7,6 +7,7 @@ import userRoutes from './routes/user.routes';
 import feedbackRoutes from './routes/feedback.routes';
 import botRoutes from './routes/bot.routes';
 import relevanceLevelRoutes from './routes/relevance-level.routes';
+import telegramChannelRoutes from './routes/telegram-channel.routes';
 import './models/User';
 import './models/UserInterest';
 import './models/AnalysisHistory';
@@ -15,7 +16,13 @@ import './models/BotAnalysisHistory';
 import './models/UserInterestLevel';
 import './models/ContentRelevanceScore';
 import './models/UserSemanticTag';
+import TelegramChannel from './models/TelegramChannel';
+import TelegramChannelPost from './models/TelegramChannelPost';
 import historyCleanupService from './services/history-cleanup.service';
+
+// Устанавливаем связи между моделями после их импорта
+TelegramChannel.hasMany(TelegramChannelPost, { foreignKey: 'channelId', as: 'TelegramChannelPosts' });
+import { startChannelMonitoring } from './services/telegram-channel-monitor.service';
 
 dotenv.config();
 
@@ -63,6 +70,7 @@ app.use('/api/auth', userRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/bot', botRoutes);
 app.use('/api/relevance-level', relevanceLevelRoutes);
+app.use('/api/telegram-channels', telegramChannelRoutes);
 
 app.get('/', (req: Request, res: Response) => {
     res.send('API is running...');
@@ -177,8 +185,13 @@ const startServer = async () => {
             const cleanupIntervalHours = parseInt(process.env.HISTORY_CLEANUP_INTERVAL_HOURS || '48', 10);
             console.log(`🔄 Starting periodic history cleanup (every ${cleanupIntervalHours} hours)...`);
             historyCleanupService.startPeriodicCleanup(cleanupIntervalHours);
+
+            // Запускаем мониторинг Telegram-каналов
+            const channelCheckIntervalHours = parseInt(process.env.TELEGRAM_CHANNEL_CHECK_INTERVAL_HOURS || '6', 10);
+            console.log(`📢 Starting Telegram channel monitoring (every ${channelCheckIntervalHours} hours)...`);
+            startChannelMonitoring(channelCheckIntervalHours);
         } else {
-            console.warn('⏭️ Skipping history cleanup: database not connected');
+            console.warn('⏭️ Skipping history cleanup and channel monitoring: database not connected');
         }
     });
     

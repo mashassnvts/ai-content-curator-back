@@ -27,6 +27,12 @@ const isValidUrl = (str: string): boolean => {
         return false;
     }
     
+    // Проверяем Telegram-ссылку (https://t.me/channel/message_id)
+    const telegramPattern = /^https?:\/\/t\.me\/[^\/]+\/\d+/;
+    if (telegramPattern.test(trimmed)) {
+        return true;
+    }
+    
     // Если содержит пробелы в середине - это не URL
     if (trimmed.includes(' ') && !trimmed.startsWith('http')) {
         return false;
@@ -279,7 +285,7 @@ const processTextAnalysis = async (
  * @param userId - ID пользователя (опционально)
  * @param mode - Режим анализа: 'read' (прочитал и понравилось) или 'unread' (стоит ли читать)
  */
-const processSingleUrlAnalysis = async (
+export const processSingleUrlAnalysis = async (
     url: string, 
     interests: string, 
     feedbackHistory: UserFeedbackHistory[] = [], 
@@ -891,16 +897,15 @@ export const findSimilarArticlesEndpoint = async (req: AuthenticatedRequest, res
         const textForEmbedding = text.length > MAX_TEXT_LENGTH ? text.substring(0, MAX_TEXT_LENGTH) : text;
         const queryEmbedding = await generateEmbedding(textForEmbedding);
 
-        // Ищем похожие статьи с повышенным порогом для более точных результатов
-        // ИСПРАВЛЕНИЕ: Повышаем порог до 75% для более точного поиска
-        // Это исключит слабые совпадения (например, статьи про стиль и статьи про ИИ)
-        // Порог 75% означает, что статьи должны быть действительно похожими по смыслу
+        // Ищем похожие статьи с адаптивным порогом
+        // Порог 45% позволяет находить тематически связанные статьи
+        // (например, статьи про ИИ и машинное обучение будут считаться похожими)
         const similarArticles = await findSimilarArticles(
             queryEmbedding,
             userId || undefined,
             historyId || undefined,
             limit || 5,
-            0.75 // Порог схожести 75% (строгий поиск для точных результатов)
+            0.45 // Порог схожести 45% (мягкий поиск для лучшего покрытия)
         );
 
         console.log(`📊 [findSimilarArticlesEndpoint] Returning ${similarArticles.length} similar articles for user ${userId}`);

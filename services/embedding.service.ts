@@ -218,7 +218,7 @@ export async function findSimilarArticles(
     userId?: number | null,
     excludeId?: number,
     limit: number = 5,
-    similarityThreshold: number = 0.75 // Порог схожести 75% для точных результатов
+    similarityThreshold: number = 0.45 // Порог схожести 45% - более мягкий для лучшего покрытия
 ): Promise<Array<{
     id: number;
     url: string;

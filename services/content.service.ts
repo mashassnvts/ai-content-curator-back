@@ -16,6 +16,206 @@ class ContentService {
     // ... в классе ContentService ...
 
     async extractContentFromUrl(url: string): Promise<ExtractedContent> {
+        // Проверяем, является ли это Telegram-ссылкой
+        const telegramMatch = url.match(/https?:\/\/t\.me\/([^\/]+)\/(\d+)/);
+        if (telegramMatch) {
+            const channelUsername = telegramMatch[1];
+            const messageId = parseInt(telegramMatch[2], 10);
+            console.log(`📱 [Telegram] Processing Telegram post: ${url} (channel: @${channelUsername}, message: ${messageId})`);
+            
+            // Метод 1: Пробуем через Telegram Bot API (если бот имеет доступ к каналу)
+            try {
+                const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+                if (TELEGRAM_BOT_TOKEN) {
+                    console.log(`📱 [Telegram] Trying Bot API method...`);
+                    const axios = (await import('axios')).default;
+                    const botApiUrl = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+                    
+                    // Пробуем получить сообщение через forwardMessage или getChat
+                    // Для каналов нужно использовать chat_id в формате @channel_username
+                    const response = await axios.get(`${botApiUrl}/getChat`, {
+                        params: { chat_id: `@${channelUsername}` },
+                        timeout: 10000
+                    });
+                    
+                    if (response.data?.ok) {
+                        // Бот имеет доступ к каналу, пробуем получить сообщение
+                        // Примечание: прямого метода получить сообщение по ID нет, но можем попробовать через forwardMessage
+                        console.log(`✓ [Telegram] Bot has access to channel @${channelUsername}`);
+                        // К сожалению, Telegram Bot API не позволяет получить сообщение по ID напрямую
+                        // Поэтому переходим к другим методам
+                    }
+                }
+            } catch (botApiError: any) {
+                // Бот не имеет доступа или другой метод не работает - это нормально
+                console.log(`ℹ️ [Telegram] Bot API method not available: ${botApiError.message}`);
+            }
+            
+            // Метод 2: Пробуем получить текст поста через Puppeteer
+            try {
+                const browser = await puppeteer.launch({
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-web-security']
+                });
+                const page = await browser.newPage();
+                
+                // Устанавливаем User-Agent для избежания блокировки
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                
+                await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+                
+                // Ждем загрузки контента (используем setTimeout вместо устаревшего waitForTimeout)
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // Ждем загрузки виджета Telegram
+                try {
+                    await page.waitForSelector('.tgme_widget_message_text', { timeout: 5000 });
+                } catch {
+                    // Виджет может загружаться дольше
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                
+                // Извлекаем текст поста с правильными селекторами для Telegram embed
+                const postText = await page.evaluate(() => {
+                    // Основной селектор для текста сообщения в Telegram embed
+                    const messageTextEl = document.querySelector('.tgme_widget_message_text');
+                    if (messageTextEl) {
+                        // Убираем ссылки и форматирование, оставляем только текст
+                        const clone = messageTextEl.cloneNode(true) as HTMLElement;
+                        clone.querySelectorAll('a').forEach(a => {
+                            const text = a.textContent;
+                            if (text) {
+                                a.replaceWith(document.createTextNode(text));
+                            } else {
+                                a.remove();
+                            }
+                        });
+                        clone.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode('\n')));
+                        return clone.textContent?.trim() || '';
+                    }
+                    
+                    // Альтернативные селекторы
+                    const altSelectors = [
+                        '.tgme_widget_message_bubble .tgme_widget_message_text',
+                        '.tgme_widget_message_wrap .tgme_widget_message_text',
+                        '[data-post] .tgme_widget_message_text',
+                        '.tgme_widget_message_bubble',
+                    ];
+                    
+                    for (const selector of altSelectors) {
+                        const el = document.querySelector(selector);
+                        if (el) {
+                            const text = el.textContent?.trim();
+                            if (text && text.length > 20) {
+                                return text;
+                            }
+                        }
+                    }
+                    
+                    // Если ничего не нашли, пробуем извлечь из всего виджета
+                    const widget = document.querySelector('.tgme_widget_message');
+                    if (widget) {
+                        const clone = widget.cloneNode(true) as HTMLElement;
+                        clone.querySelectorAll('script, style, .tgme_widget_message_date, .tgme_widget_message_author').forEach(el => el.remove());
+                        return clone.textContent?.trim() || '';
+                    }
+                    
+                    return '';
+                });
+                
+                await browser.close();
+                
+                if (postText && postText.trim().length > 50) {
+                    // Проверяем, что это не HTML-код виджета
+                    if (postText.includes('<script') || postText.includes('tgme_widget_message') && postText.length < 200) {
+                        console.warn(`⚠️ [Telegram] Extracted content looks like HTML widget code, not actual post text`);
+                    } else {
+                        console.log(`✓ [Telegram] Extracted post content (${postText.length} chars)`);
+                        return { 
+                            content: postText.trim(), 
+                            sourceType: 'telegram' as const 
+                        };
+                    }
+                } else {
+                    console.warn(`⚠️ [Telegram] Extracted content too short (${postText?.length || 0} chars)`);
+                    if (postText) {
+                        console.warn(`   Preview: ${postText.substring(0, 100)}...`);
+                    }
+                }
+            } catch (puppeteerError: any) {
+                console.warn(`⚠️ [Telegram] Puppeteer extraction failed: ${puppeteerError.message}`);
+            }
+            
+            // Если Puppeteer не сработал, пробуем через fetch API (для публичных постов)
+            try {
+                console.log(`📱 [Telegram] Trying fetch API for embed...`);
+                const embedUrl = `https://t.me/${channelUsername}/${telegramMatch[2]}?embed=1`;
+                const axios = (await import('axios')).default;
+                const response = await axios.get(embedUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    },
+                    timeout: 15000
+                });
+                
+                if (response.data) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(response.data);
+                    
+                    // Извлекаем текст из Telegram embed HTML
+                    let text = '';
+                    
+                    // Основной селектор для текста сообщения
+                    const messageTextEl = $('.tgme_widget_message_text');
+                    if (messageTextEl.length > 0) {
+                        // Убираем ссылки, оставляем только текст
+                        const clone = messageTextEl.clone();
+                        clone.find('a').each((i, el) => {
+                            const linkText = $(el).text();
+                            $(el).replaceWith(linkText);
+                        });
+                        clone.find('br').replaceWith('\n');
+                        text = clone.text().trim();
+                    }
+                    
+                    // Если не нашли, пробуем другие селекторы
+                    if (!text || text.length < 20) {
+                        text = $('.tgme_widget_message_bubble .tgme_widget_message_text').text().trim() ||
+                               $('.tgme_widget_message_bubble').text().trim() ||
+                               $('[data-post] .tgme_widget_message_text').text().trim();
+                    }
+                    
+                    // Убираем технические строки из embed-кода
+                    if (text) {
+                        text = text
+                            .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                            .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                            .replace(/tgme_widget_message/g, '')
+                            .replace(/embed/g, '')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                    }
+                    
+                    if (text && text.trim().length > 50) {
+                        console.log(`✓ [Telegram] Extracted via fetch API (${text.length} chars)`);
+                        return {
+                            content: text.trim(),
+                            sourceType: 'telegram' as const
+                        };
+                    }
+                }
+            } catch (fetchError: any) {
+                console.warn(`⚠️ [Telegram] Fetch API failed: ${fetchError.message}`);
+            }
+            
+            // Возвращаем базовую информацию если ничего не сработало
+            console.warn(`⚠️ [Telegram] All extraction methods failed for ${url}`);
+            return {
+                content: `Telegram пост из канала @${channelUsername}\n\nURL: ${url}\n\n⚠️ Не удалось извлечь полный текст поста. Попробуйте открыть ссылку вручную и скопировать текст для анализа.`,
+                sourceType: 'telegram' as const
+            };
+        }
+        
         // Определяем тип URL
         const videoPlatform = this.detectVideoPlatform(url);
         
@@ -94,25 +294,9 @@ class ContentService {
                     }
                 }
                 
-                // Метод 3: ScrapingBee API для получения HTML и извлечения транскрипта
+                // Метод 3: yt-dlp для извлечения субтитров (если доступны)
                 try {
-                    console.log('   [3/4] Trying ScrapingBee API for transcript...');
-                    const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                    if (scrapingBeeContent) {
-                        console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
-                        const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
-                        }
-                    }
-                } catch (scrapingBeeError: any) {
-                    console.log(`   ⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
-                }
-                
-                // Метод 4: yt-dlp для извлечения субтитров (если доступны)
-                try {
-                    console.log('   [4/4] Trying yt-dlp for transcript extraction...');
+                    console.log('   [3/3] Trying yt-dlp for transcript extraction...');
                     const transcriptText = await this.extractTranscriptWithYtDlp(url);
                     if (transcriptText && transcriptText.trim().length > 50) {
                         console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
@@ -174,37 +358,7 @@ class ContentService {
                 console.log(`Falling back to Puppeteer extraction...`);
             }
 
-            // 4. FALLBACK: Метаданные через ScrapingBee (не требует браузеров)
-            try {
-                const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                if (scrapingBeeContent) {
-                    const cheerio = await import('cheerio');
-                    const $ = cheerio.load(scrapingBeeContent);
-                    
-                    // Извлекаем метаданные (title, description)
-                    const title = $('meta[property="og:title"]').attr('content') || 
-                                 $('title').text() || 
-                                 $('h1').first().text();
-                    const description = $('meta[property="og:description"]').attr('content') || 
-                                      $('meta[name="description"]').attr('content') || '';
-                    
-                    if (title || description) {
-                        const contentParts: string[] = [];
-                        if (title) contentParts.push(`Название: ${title.trim()}`);
-                        if (description) contentParts.push(`\n\nОписание: ${description.trim()}`);
-                        
-                        const content = contentParts.join('') + 
-                            '\n\n⚠️ ВАЖНО: Это только метаданные видео (название, описание). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных.';
-                        
-                        console.log(`✓ Using ScrapingBee metadata for ${videoPlatform}`);
-                        return { content, sourceType: 'metadata' };
-                    }
-                }
-            } catch (scrapingBeeError: any) {
-                console.log(`⚠️ ScrapingBee metadata extraction failed: ${scrapingBeeError.message}`);
-            }
-            
-            // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // 4. FALLBACK: Парсинг страницы через Puppeteer (позволяет собрать доп. текст и комментарии)
             try {
                 const metadata = await this.extractVideoMetadata(url, videoPlatform);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
@@ -248,48 +402,7 @@ class ContentService {
                 sourceType: 'metadata' as const
             };
         } else {
-            // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
-            // Сначала пробуем ScrapingBee (не требует браузеров)
-            try {
-                const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                if (scrapingBeeContent) {
-                    const cheerio = await import('cheerio');
-                    const $ = cheerio.load(scrapingBeeContent);
-                    
-                    // Извлекаем основной контент статьи
-                    const mainContentSelectors = ['article', 'main', '.post-content', '.article-body', 'body'];
-                    let mainEl = null;
-                    for (const selector of mainContentSelectors) {
-                        const element = $(selector).first();
-                        if (element.length > 0) {
-                            mainEl = element;
-                            break;
-        }
-    }
-
-                    if (mainEl && mainEl.length > 0) {
-                        // Удаляем ненужные элементы
-                        mainEl.find('script, style, nav, header, footer, aside, form, button, .comments, #comments').remove();
-                        
-                        // Извлекаем текст
-                        const paragraphs = mainEl.find('p, h1, h2, h3, li, pre, code').toArray();
-                        const content = paragraphs
-                            .map((el: any) => $(el).text().trim())
-                            .filter((text: string) => text.length > 20)
-                            .join('\n\n');
-                        
-                        if (content.trim().length > 100) {
-                            console.log(`✓ Using ScrapingBee for article (${content.length} chars)`);
-                            return { content, sourceType: 'article' };
-                        }
-                    }
-                }
-            } catch (scrapingBeeError: any) {
-                console.log(`⚠️ ScrapingBee failed for article: ${scrapingBeeError.message}`);
-                console.log(`   Trying Puppeteer fallback...`);
-            }
-            
-            // Fallback на Puppeteer
+            // Статья - извлекаем контент через Puppeteer
             try {
                 return await this.scrapeArticleWithPuppeteer(url);
             } catch (puppeteerError: any) {
@@ -549,94 +662,6 @@ class ContentService {
         }
         
         return launchOptions;
-    }
-
-    /**
-     * Извлекает HTML контент через ScrapingBee API (не требует браузеров)
-     */
-    private async extractWithScrapingBee(url: string): Promise<string | null> {
-        // Поддержка нескольких API ключей через переменную окружения (разделенные запятыми)
-        const apiKeysEnv = process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS;
-        if (!apiKeysEnv) {
-            console.log('⚠️ SCRAPINGBEE_API_KEY or SCRAPINGBEE_API_KEYS not set, skipping ScrapingBee');
-            return null;
-        }
-
-        // Разбиваем ключи по запятым и очищаем от пробелов
-        const apiKeys = apiKeysEnv.split(',').map(key => key.trim()).filter(key => key.length > 0);
-        
-        if (apiKeys.length === 0) {
-            console.log('⚠️ No valid ScrapingBee API keys found');
-            return null;
-        }
-
-        const axios = await import('axios');
-        const apiUrl = 'https://app.scrapingbee.com/api/v1/';
-
-        // Пробуем каждый ключ по очереди
-        for (let i = 0; i < apiKeys.length; i++) {
-            const apiKey = apiKeys[i];
-            const isLastKey = i === apiKeys.length - 1;
-            
-            try {
-                if (apiKeys.length > 1) {
-                    console.log(`Trying ScrapingBee API (key ${i + 1}/${apiKeys.length})...`);
-                } else {
-                    console.log('Trying ScrapingBee API...');
-                }
-                
-                const params = new URLSearchParams({
-                    'api_key': apiKey,
-                    'url': url,
-                    'render_js': 'true', // Выполняет JavaScript на странице
-                    'premium_proxy': 'true', // Использует премиум прокси для обхода блокировок
-                    'country_code': 'us', // Страна прокси
-                });
-
-                const response = await axios.default.get(apiUrl, {
-                    params: params,
-                    timeout: 30000, // 30 секунд таймаут
-                });
-
-                if (response.data) {
-                    console.log('✓ ScrapingBee successfully fetched content');
-                    return typeof response.data === 'string' ? response.data : response.data.toString();
-                }
-            } catch (error: any) {
-                const status = error.response?.status;
-                const statusText = error.response?.statusText;
-                
-                // Обрабатываем разные типы ошибок
-                if (status === 401 || status === 403) {
-                    console.log(`⚠️ ScrapingBee API authentication error (${status}) for key ${i + 1}: Invalid API key or access denied`);
-                    if (!isLastKey) {
-                        console.log(`   Trying next API key...`);
-                        continue; // Пробуем следующий ключ
-                    }
-                } else if (status === 429) {
-                    console.log(`⚠️ ScrapingBee API rate limit exceeded (429) for key ${i + 1}: Too many requests`);
-                    if (!isLastKey) {
-                        console.log(`   Trying next API key...`);
-                        continue; // Пробуем следующий ключ
-                    }
-                } else if (status >= 500) {
-                    console.log(`⚠️ ScrapingBee API server error (${status}) for key ${i + 1}: ${statusText || error.message}`);
-                    if (!isLastKey) {
-                        console.log(`   Trying next API key...`);
-                        continue; // Пробуем следующий ключ
-                    }
-                } else {
-                    console.log(`⚠️ ScrapingBee API error for key ${i + 1}: ${error.message || 'Unknown error'}`);
-                    if (!isLastKey) {
-                        console.log(`   Trying next API key...`);
-                        continue; // Пробуем следующий ключ
-                    }
-                }
-            }
-        }
-        
-        console.log(`❌ All ScrapingBee API keys failed`);
-        return null;
     }
 
     /**

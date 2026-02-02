@@ -261,13 +261,13 @@ async function getRAGContext(
         console.log(`🔍 [RAG] Generating embedding for RAG context (${textForEmbedding.length} chars${content.length > MAX_TEXT_LENGTH ? `, truncated from ${content.length}` : ''})...`);
         const articleEmbedding = await generateEmbedding(textForEmbedding);
         
-        // Находим похожие статьи из истории пользователя
+        // Находим похожие статьи из истории пользователя для RAG-контекста
         const similarArticles = await findSimilarArticles(
             articleEmbedding,
             userId,
             undefined, // Не исключаем никакие статьи (может быть новая статья)
             5, // Топ-5 похожих статей
-            0.65 // Порог схожести 65%
+            0.45 // Порог схожести 45% для лучшего покрытия
         );
 
         if (similarArticles.length === 0) {

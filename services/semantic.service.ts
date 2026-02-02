@@ -863,7 +863,7 @@ async function getRAGContextForRecommendation(
             userId,
             undefined,
             3, // Топ-3 для рекомендаций
-            0.65
+            0.45 // Порог схожести 45%
         );
 
         if (similarArticles.length === 0) {
