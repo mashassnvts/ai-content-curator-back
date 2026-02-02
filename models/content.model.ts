@@ -1,4 +1,4 @@
 export interface ExtractedContent {
     content: string;
-    sourceType: 'transcript' | 'metadata' | 'article';
+    sourceType: 'transcript' | 'metadata' | 'article' | 'telegram';
 }

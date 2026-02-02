@@ -125,12 +125,16 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
                     );
 
                     // Сохраняем ID анализа в пост
-                    if (analysisResult && analysisResult.analysisHistoryId) {
-                        await channelPost.update({
-                            analysisHistoryId: analysisResult.analysisHistoryId
-                        });
+                    // Проверяем, что анализ успешен и не содержит ошибок
+                    if (analysisResult && !('error' in analysisResult && analysisResult.error)) {
+                        const result = analysisResult as any;
+                        if (result.analysisHistoryId) {
+                            await channelPost.update({
+                                analysisHistoryId: result.analysisHistoryId
+                            });
+                        }
+                        console.log(`✅ [telegram-channel] Post analyzed: score=${result?.score}, verdict=${result?.verdict}`);
                     }
-                    console.log(`✅ [telegram-channel] Post analyzed: score=${analysisResult?.score}, verdict=${analysisResult?.verdict}`);
                 }
             } catch (analysisError: any) {
                 console.error(`⚠️ [telegram-channel] Failed to analyze post: ${analysisError.message}`);
@@ -145,12 +149,15 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
                     channelUsername: channel.channelUsername,
                     postUrl
                 },
-                analysis: analysisResult ? {
-                    score: analysisResult.score,
-                    verdict: analysisResult.verdict,
-                    summary: analysisResult.summary,
-                    reasoning: analysisResult.reasoning
-                } : null
+                analysis: analysisResult && !('error' in analysisResult && analysisResult.error) ? (() => {
+                    const result = analysisResult as any;
+                    return {
+                        score: result.score,
+                        verdict: result.verdict,
+                        summary: result.summary,
+                        reasoning: result.reasoning
+                    };
+                })() : null
             });
         }
 
