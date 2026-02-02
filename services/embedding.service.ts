@@ -301,7 +301,12 @@ export async function findSimilarArticles(
         return filteredResults;
 
     } catch (error: any) {
-        console.error(`❌ [findSimilarArticles] Error finding similar articles: ${error.message}`);
+        const msg = error.message || String(error);
+        if (msg.includes('operator does not exist') && msg.includes('text <=> vector')) {
+            console.warn(`⚠️ [findSimilarArticles] Column 'embedding' is TEXT, not vector. Run fix-embedding-column.sql in Neon. Returning empty.`);
+            return [];
+        }
+        console.error(`❌ [findSimilarArticles] Error finding similar articles: ${msg}`);
         throw error;
     }
 }
