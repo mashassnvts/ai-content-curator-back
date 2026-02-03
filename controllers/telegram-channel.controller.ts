@@ -126,14 +126,16 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
 
                     // Сохраняем ID анализа в пост
                     // Проверяем, что анализ успешен и не содержит ошибок
-                    if (analysisResult && !('error' in analysisResult && analysisResult.error)) {
+                    if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
                         const result = analysisResult as any;
-                        if (result.analysisHistoryId) {
+                        if (result && typeof result.analysisHistoryId === 'number') {
                             await channelPost.update({
                                 analysisHistoryId: result.analysisHistoryId
                             });
                         }
-                        console.log(`✅ [telegram-channel] Post analyzed: score=${result?.score}, verdict=${result?.verdict}`);
+                        if (result && typeof result.score === 'number' && typeof result.verdict === 'string') {
+                            console.log(`✅ [telegram-channel] Post analyzed: score=${result.score}, verdict=${result.verdict}`);
+                        }
                     }
                 }
             } catch (analysisError: any) {
@@ -149,14 +151,17 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
                     channelUsername: channel.channelUsername,
                     postUrl
                 },
-                analysis: analysisResult && !('error' in analysisResult && analysisResult.error) ? (() => {
+                analysis: analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error) ? (() => {
                     const result = analysisResult as any;
-                    return {
-                        score: result.score,
-                        verdict: result.verdict,
-                        summary: result.summary,
-                        reasoning: result.reasoning
-                    };
+                    if (result && typeof result.score === 'number' && typeof result.verdict === 'string') {
+                        return {
+                            score: result.score,
+                            verdict: result.verdict,
+                            summary: typeof result.summary === 'string' ? result.summary : null,
+                            reasoning: typeof result.reasoning === 'string' ? result.reasoning : null
+                        };
+                    }
+                    return null;
                 })() : null
             });
         }

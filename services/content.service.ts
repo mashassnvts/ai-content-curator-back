@@ -131,10 +131,11 @@ class ContentService {
                         console.warn(`⚠️ [Telegram] Extracted content looks like HTML widget code, not actual post text`);
                     } else {
                         console.log(`✓ [Telegram] Extracted post content (${postText.length} chars)`);
-                        return { 
+                        const result: ExtractedContent = { 
                             content: postText.trim(), 
-                            sourceType: 'telegram' as const 
+                            sourceType: 'telegram'
                         };
+                        return result;
                     }
                 } else {
                     console.warn(`⚠️ [Telegram] Extracted content too short (${postText?.length || 0} chars)`);
@@ -198,10 +199,11 @@ class ContentService {
                     
                     if (text && text.trim().length > 50) {
                         console.log(`✓ [Telegram] Extracted via fetch API (${text.length} chars)`);
-                        return {
+                        const result: ExtractedContent = {
                             content: text.trim(),
-                            sourceType: 'telegram' as const
+                            sourceType: 'telegram'
                         };
+                        return result;
                     }
                 }
             } catch (fetchError: any) {
@@ -210,10 +212,11 @@ class ContentService {
             
             // Возвращаем базовую информацию если ничего не сработало
             console.warn(`⚠️ [Telegram] All extraction methods failed for ${url}`);
-            return {
+            const result: ExtractedContent = {
                 content: `Telegram пост из канала @${channelUsername}\n\nURL: ${url}\n\n⚠️ Не удалось извлечь полный текст поста. Попробуйте открыть ссылку вручную и скопировать текст для анализа.`,
-                sourceType: 'telegram' as const
+                sourceType: 'telegram'
             };
+            return result;
         }
         
         // Определяем тип URL

@@ -890,23 +890,35 @@ export const findSimilarArticlesEndpoint = async (req: AuthenticatedRequest, res
         console.log(`🔍 Finding similar articles for text (${text.length} chars)`);
 
         // Генерируем эмбеддинг для запроса
-        // ИСПРАВЛЕНИЕ: Используем весь текст (до 50000 символов) для соответствия с тем, что сохраняется в БД
-        // При сохранении используется: весь текст статьи (до 50000 символов) + summary + url
-        // Для поиска используем переданный текст (summary) с тем же максимумом
-        const MAX_TEXT_LENGTH = 50000; // Максимум для очень длинных статей
+        const MAX_TEXT_LENGTH = 50000;
         const textForEmbedding = text.length > MAX_TEXT_LENGTH ? text.substring(0, MAX_TEXT_LENGTH) : text;
-        const queryEmbedding = await generateEmbedding(textForEmbedding);
+        let queryEmbedding: number[];
+        try {
+            queryEmbedding = await generateEmbedding(textForEmbedding);
+        } catch (embErr: any) {
+            console.error('Error generating embedding for find-similar:', embErr?.message);
+            return res.status(500).json({ 
+                message: 'Error generating embedding',
+                error: embErr?.message || 'Unknown error',
+                similarArticles: []
+            });
+        }
 
-        // Ищем похожие статьи с адаптивным порогом
-        // Порог 45% позволяет находить тематически связанные статьи
-        // (например, статьи про ИИ и машинное обучение будут считаться похожими)
-        const similarArticles = await findSimilarArticles(
-            queryEmbedding,
-            userId || undefined,
-            historyId || undefined,
-            limit || 5,
-            0.45 // Порог схожести 45% (мягкий поиск для лучшего покрытия)
-        );
+        // Ищем похожие статьи; при ошибке БД (например, колонка embedding — TEXT вместо vector) возвращаем пустой массив
+        let similarArticles: Array<{ id: number; url: string; summary: string | null; similarity: number }>;
+        try {
+            similarArticles = await findSimilarArticles(
+                queryEmbedding,
+                userId || undefined,
+                historyId || undefined,
+                limit || 5,
+                0.45
+            );
+        } catch (dbErr: any) {
+            const msg = dbErr?.message || String(dbErr);
+            console.warn(`⚠️ [findSimilarArticlesEndpoint] DB error (returning empty): ${msg}`);
+            similarArticles = [];
+        }
 
         console.log(`📊 [findSimilarArticlesEndpoint] Returning ${similarArticles.length} similar articles for user ${userId}`);
 
@@ -919,8 +931,11 @@ export const findSimilarArticlesEndpoint = async (req: AuthenticatedRequest, res
 
     } catch (error: any) {
         console.error('Error in findSimilarArticles:', error);
-        return res.status(500).json({ 
-            message: 'Error finding similar articles',
+        return res.status(200).json({ 
+            success: true,
+            similarArticles: [],
+            count: 0,
+            message: 'Could not find similar articles',
             error: error.message || 'Unknown error'
         });
     }
