@@ -336,7 +336,7 @@ class UserController {
                     setImmediate(async () => {
                         try {
                             const { analyzeCommentSentiment } = await import('../services/semantic.service');
-                            const sentimentResult = await analyzeCommentSentiment(comment);
+                            const sentiment = await analyzeCommentSentiment(comment);
                             
                             // Обновляем тональность в сохраненном комментарии
                             const updatedRecord = await AnalysisHistory.findByPk(historyId);
@@ -345,7 +345,7 @@ class UserController {
                                 if (commentDataMatch) {
                                     try {
                                         const existingData = JSON.parse(commentDataMatch[1]);
-                                        existingData.sentiment = sentimentResult.sentiment;
+                                        existingData.sentiment = sentiment;
                                         
                                         const updatedCommentData = `[COMMENT_DATA]${JSON.stringify(existingData)}[END_COMMENT_DATA]`;
                                         const newReasoning = updatedRecord.reasoning.replace(
@@ -354,7 +354,7 @@ class UserController {
                                         );
                                         
                                         await updatedRecord.update({ reasoning: newReasoning });
-                                        console.log(`✅ [saveAnalysisComment] Updated sentiment to ${sentimentResult.sentiment} for comment in history ID: ${historyId}`);
+                                        console.log(`✅ [saveAnalysisComment] Updated sentiment to ${sentiment} for comment in history ID: ${historyId}`);
                                     } catch (parseError) {
                                         console.warn(`⚠️ [saveAnalysisComment] Failed to update sentiment: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
                                     }
