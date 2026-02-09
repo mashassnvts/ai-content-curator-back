@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import UserInterest from '../models/UserInterest';
 import UserService from '../services/user.service';
+import { analyzeCommentSentiment } from '../services/semantic.service';
 import { CreateUserDTO, LoginUserDTO } from '../interfaces/user.interface';
 
 dotenv.config();
@@ -302,76 +303,64 @@ class UserController {
                 return res.status(400).json({ message: 'Comment is required' });
             }
 
-            // Сохраняем комментарий немедленно, анализ тональности делаем асинхронно (в фоне)
-            try {
-                const AnalysisHistory = (await import('../models/AnalysisHistory')).default;
-                const historyRecord = await AnalysisHistory.findByPk(historyId);
-                
-                if (historyRecord && historyRecord.userId === userId) {
-                    // Сохраняем комментарий с временной тональностью "neutral" (будет обновлена асинхронно)
-                    const commentData = {
-                        comment: comment,
-                        articleThemes: articleThemes || [],
-                        sentiment: 'neutral' as const, // Временное значение, будет обновлено асинхронно
-                        createdAt: new Date().toISOString()
-                    };
-                    
-                    // Добавляем к существующему reasoning или создаем новый
-                    let updatedReasoning = historyRecord.reasoning || '';
-                    if (updatedReasoning.includes('[COMMENT_DATA]')) {
-                        // Заменяем существующий комментарий
-                        updatedReasoning = updatedReasoning.replace(
-                            /\[COMMENT_DATA\][\s\S]*?\[END_COMMENT_DATA\]/,
-                            `[COMMENT_DATA]${JSON.stringify(commentData)}[END_COMMENT_DATA]`
-                        );
-                    } else {
-                        // Добавляем новый комментарий
-                        updatedReasoning += `\n\n[COMMENT_DATA]${JSON.stringify(commentData)}[END_COMMENT_DATA]`;
-                    }
-                    
-                    await historyRecord.update({ reasoning: updatedReasoning });
-                    console.log(`💾 [saveAnalysisComment] Saved comment and ${articleThemes?.length || 0} article themes to analysis_history ID: ${historyId}`);
-                    
-                    // Анализируем тональность асинхронно (в фоне) - не блокируем ответ пользователю
-                    setImmediate(async () => {
-                        try {
-                            const { analyzeCommentSentiment } = await import('../services/semantic.service');
-                            const sentiment = await analyzeCommentSentiment(comment);
-                            
-                            // Обновляем тональность в сохраненном комментарии
-                            const updatedRecord = await AnalysisHistory.findByPk(historyId);
-                            if (updatedRecord && updatedRecord.reasoning) {
-                                const commentDataMatch = updatedRecord.reasoning.match(/\[COMMENT_DATA\]([\s\S]*?)\[END_COMMENT_DATA\]/);
-                                if (commentDataMatch) {
-                                    try {
-                                        const existingData = JSON.parse(commentDataMatch[1]);
-                                        existingData.sentiment = sentiment;
-                                        
-                                        const updatedCommentData = `[COMMENT_DATA]${JSON.stringify(existingData)}[END_COMMENT_DATA]`;
-                                        const newReasoning = updatedRecord.reasoning.replace(
-                                            /\[COMMENT_DATA\][\s\S]*?\[END_COMMENT_DATA\]/,
-                                            updatedCommentData
-                                        );
-                                        
-                                        await updatedRecord.update({ reasoning: newReasoning });
-                                        console.log(`✅ [saveAnalysisComment] Updated sentiment to ${sentiment} for comment in history ID: ${historyId}`);
-                                    } catch (parseError) {
-                                        console.warn(`⚠️ [saveAnalysisComment] Failed to update sentiment: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
-                                    }
-                                }
-                            }
-                        } catch (sentimentError: any) {
-                            console.warn(`⚠️ [saveAnalysisComment] Failed to analyze sentiment asynchronously: ${sentimentError.message}`);
-                            // Игнорируем ошибки анализа тональности - комментарий уже сохранен
-                        }
-                    });
-                }
-            } catch (dbError: any) {
-                console.warn(`⚠️ [saveAnalysisComment] Failed to save comment to DB: ${dbError.message}`);
-                throw dbError; // Пробрасываем ошибку, чтобы вернуть 500
+            // Сохраняем комментарий сразу с нейтральной тональностью — быстрый ответ пользователю
+            const AnalysisHistory = (await import('../models/AnalysisHistory')).default;
+            const historyRecord = await AnalysisHistory.findByPk(historyId);
+            
+            if (!historyRecord || historyRecord.userId !== userId) {
+                return res.status(404).json({ message: 'Analysis history not found' });
             }
 
-            // Возвращаем ответ немедленно, не дожидаясь анализа тональности
+            // Сохраняем комментарий сразу с sentiment: 'neutral', анализ тональности — в фоне
+            const commentDataInitial = {
+                comment: comment,
+                articleThemes: articleThemes || [],
+                sentiment: 'neutral' as const,
+                createdAt: new Date().toISOString()
+            };
+            
+            let updatedReasoning = historyRecord.reasoning || '';
+            if (updatedReasoning.includes('[COMMENT_DATA]')) {
+                updatedReasoning = updatedReasoning.replace(
+                    /\[COMMENT_DATA\][\s\S]*?\[END_COMMENT_DATA\]/,
+                    `[COMMENT_DATA]${JSON.stringify(commentDataInitial)}[END_COMMENT_DATA]`
+                );
+            } else {
+                updatedReasoning += `\n\n[COMMENT_DATA]${JSON.stringify(commentDataInitial)}[END_COMMENT_DATA]`;
+            }
+            
+            await historyRecord.update({ reasoning: updatedReasoning });
+            console.log(`💾 [saveAnalysisComment] Saved comment immediately, sentiment analysis in background. Analysis_history ID: ${historyId}`);
+
+            // Анализ тональности в фоне — не блокирует ответ
+            setImmediate(async () => {
+                try {
+                    const sentimentResult = await analyzeCommentSentiment(comment);
+                    
+                    const record = await AnalysisHistory.findByPk(historyId);
+                    if (!record || record.userId !== userId) return;
+                    
+                    const commentDataWithSentiment = {
+                        comment: comment,
+                        articleThemes: articleThemes || [],
+                        sentiment: sentimentResult.sentiment,
+                        createdAt: commentDataInitial.createdAt
+                    };
+                    
+                    let reasoning = record.reasoning || '';
+                    if (reasoning.includes('[COMMENT_DATA]')) {
+                        reasoning = reasoning.replace(
+                            /\[COMMENT_DATA\][\s\S]*?\[END_COMMENT_DATA\]/,
+                            `[COMMENT_DATA]${JSON.stringify(commentDataWithSentiment)}[END_COMMENT_DATA]`
+                        );
+                        await record.update({ reasoning });
+                        console.log(`💾 [saveAnalysisComment] Updated sentiment to ${sentimentResult.sentiment} for history ID: ${historyId}`);
+                    }
+                } catch (bgError: any) {
+                    console.warn(`⚠️ [saveAnalysisComment] Background sentiment analysis failed: ${bgError.message}`);
+                }
+            });
+
             return res.status(200).json({ 
                 message: 'Comment saved successfully',
                 commentSaved: true

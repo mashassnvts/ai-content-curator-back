@@ -131,7 +131,6 @@ export async function getChannelPosts(
                 }
 
                 // Извлекаем все посты со страницы, затем возьмём последние N (по messageId)
-                const sinceIdArg = sinceMessageId ?? 0;
                 const scrapedPosts = await page.evaluate((sinceId: number) => {
                     const posts: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
                     
@@ -211,7 +210,7 @@ export async function getChannelPosts(
                     // Сортируем по messageId (новые первые) и возвращаем все — фильтрация по limit будет снаружи
                     posts.sort((a, b) => b.messageId - a.messageId);
                     return posts;
-                }, sinceIdArg);
+                }, sinceMessageId || 0);
 
                 await browser.close();
 

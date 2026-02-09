@@ -248,22 +248,6 @@ class ContentService {
                 sourceType: 'metadata' as const
             };
         } else {
-            // ============================================
-            // ПРИОРИТЕТ: Telegram-посты (t.me/channel/messageId)
-            // ============================================
-            if (this.isTelegramPostUrl(url)) {
-                try {
-                    console.log(`📱 [Telegram] Extracting post content from: ${url}`);
-                    const telegramContent = await this.extractTelegramPostWithPuppeteer(url);
-                    if (telegramContent && telegramContent.content.trim().length > 20) {
-                        console.log(`✓ Extracted Telegram post (${telegramContent.content.length} chars)`);
-                        return telegramContent;
-                    }
-                } catch (telegramError: any) {
-                    console.warn(`⚠️ Telegram post extraction failed: ${telegramError.message}. Falling back to generic extraction...`);
-                }
-            }
-
             // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
             // Сначала пробуем ScrapingBee (не требует браузеров)
             try {
@@ -1374,31 +1358,18 @@ class ContentService {
     /**
      * Извлекает транскрипт YouTube видео через yt-dlp
      */
-    private getYtDlpOptions(base: Record<string, unknown> = {}): Record<string, unknown> {
-        const opts = { ...base };
-        const cookiesPath = process.env.YT_DLP_COOKIES_PATH;
-        if (cookiesPath) {
-            (opts as any).cookies = cookiesPath;
-            console.log(`   Using yt-dlp cookies from: ${cookiesPath}`);
-        }
-        return opts;
-    }
-
     private async extractTranscriptWithYtDlp(url: string): Promise<string | null> {
         try {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
             
-            const baseOpts = {
+            // Сначала получаем информацию о доступных субтитрах
+            const infoResult = await ytdlp(url, {
                 listSubs: true,
                 skipDownload: true,
                 quiet: true,
                 noWarnings: true,
-            };
-            const opts = this.getYtDlpOptions(baseOpts);
-            
-            // Сначала получаем информацию о доступных субтитрах
-            const infoResult = await ytdlp(url, opts);
+            });
             
             // Пробуем скачать автоматически сгенерированные субтитры или обычные
             // Используем временный файл для субтитров
@@ -1407,14 +1378,14 @@ class ContentService {
             
             try {
                 // Пробуем скачать автоматические субтитры (если доступны)
-                await ytdlp(url, this.getYtDlpOptions({
+                await ytdlp(url, {
                     writeAutoSub: true,
                     subLang: 'ru,en,uk', // Приоритет языков
                     skipDownload: true,
                     output: tempSubsFile.replace('.vtt', ''),
                     quiet: true,
                     noWarnings: true,
-                }) as any);
+                });
                 
                 // Ищем скачанный файл субтитров
                 const glob = await import('glob');
@@ -1452,14 +1423,14 @@ class ContentService {
             } catch (downloadError: any) {
                 // Если автоматические субтитры недоступны, пробуем обычные
                 try {
-                    await ytdlp(url, this.getYtDlpOptions({
+                    await ytdlp(url, {
                         writeSub: true,
                         subLang: 'ru,en,uk',
                         skipDownload: true,
                         output: tempSubsFile.replace('.vtt', ''),
                         quiet: true,
                         noWarnings: true,
-                    }) as any);
+                    });
                     
                     const glob = await import('glob');
                     const possibleFiles = glob.sync(`${tempSubsFile.replace('.vtt', '')}.*`);
@@ -1508,13 +1479,13 @@ class ContentService {
         try {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
-            const rawResult = await ytdlp(url, this.getYtDlpOptions({
+            const rawResult = await ytdlp(url, {
                 dumpSingleJson: true,
                 noWarnings: true,
                 simulate: true,
                 skipDownload: true,
                 quiet: true,
-            }) as any);
+            });
 
             const parsed = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
             const title = parsed?.title || parsed?.fulltitle;
@@ -1588,58 +1559,6 @@ class ContentService {
 
     private isYoutubeUrl(url: string): boolean {
         return this.detectVideoPlatform(url) === 'youtube';
-    }
-
-    /** URL поста Telegram: t.me/channel_username/messageId */
-    private isTelegramPostUrl(url: string): boolean {
-        return /^https?:\/\/t\.me\/[^\/]+\/\d+/.test(url.trim());
-    }
-
-    /**
-     * Извлекает полный текст поста из страницы t.me/channel/messageId
-     */
-    private async extractTelegramPostWithPuppeteer(url: string): Promise<ExtractedContent> {
-        let browser = null;
-        try {
-            const launchOptions = await this.getPuppeteerLaunchOptions();
-            browser = await puppeteer.launch(launchOptions);
-            const page = await browser.newPage();
-            await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-            await page.setExtraHTTPHeaders({ 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8' });
-
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            const content = await page.evaluate(() => {
-                // Селектор текста поста в Telegram Web
-                const textEl = document.querySelector('.tgme_widget_message_text');
-                if (textEl) {
-                    const clone = textEl.cloneNode(true) as HTMLElement;
-                    clone.querySelectorAll('a').forEach(a => {
-                        const linkText = a.textContent;
-                        if (linkText) {
-                            a.replaceWith(document.createTextNode(linkText));
-                        } else {
-                            a.remove();
-                        }
-                    });
-                    clone.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode('\n')));
-                    return clone.textContent?.trim() || '';
-                }
-                // Fallback: og:description из meta
-                const ogDesc = document.querySelector('meta[property="og:description"]');
-                return ogDesc?.getAttribute('content')?.trim() || '';
-            });
-
-            if (content && content.trim().length > 20) {
-                return { content: content.trim(), sourceType: 'telegram' };
-            }
-            throw new Error('Could not extract post text');
-        } finally {
-            if (browser) {
-                await browser.close();
-            }
-        }
     }
 
     private async scrapeArticleWithPuppeteer(url: string): Promise<ExtractedContent> {
@@ -2382,7 +2301,7 @@ class ContentService {
                 };
             }
 
-            await ytdlp(url, this.getYtDlpOptions(options) as any);
+            await ytdlp(url, options);
 
             // Проверяем, что файл действительно скачался
             if (!(await fs.pathExists(normalizedOutput))) {
