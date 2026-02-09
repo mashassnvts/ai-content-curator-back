@@ -131,7 +131,7 @@ export async function getChannelPosts(
                 }
 
                 // Извлекаем все посты со страницы, затем возьмём последние N (по messageId)
-                const scrapedPosts = await page.evaluate((sinceId: number) => {
+                const scrapedPosts = await page.evaluate((sinceId) => {
                     const posts: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
                     
                     // Селекторы для постов в Telegram Web
