@@ -179,9 +179,14 @@ const startServer = async () => {
     }
 
     // Запускаем сервер независимо от результата подключения к БД
-    app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
         console.log(`🚀 Server is running on port ${PORT}`);
         console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+        
+        // Увеличиваем таймауты для длительных операций (анализ видео может занимать несколько минут)
+        server.keepAliveTimeout = 300000; // 5 минут для keep-alive соединений
+        server.headersTimeout = 310000; // 5 минут 10 секунд для заголовков (должен быть больше keepAliveTimeout)
+        console.log(`⏱️ Server timeouts configured: keepAliveTimeout=${server.keepAliveTimeout}ms, headersTimeout=${server.headersTimeout}ms`);
         
         // Запускаем периодическую очистку истории только если БД подключена
         if (dbConnected) {
