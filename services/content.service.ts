@@ -1389,7 +1389,7 @@ class ContentService {
                 skipDownload: true,
                 quiet: true,
                 noWarnings: true,
-            };
+            } as any;
             
             // Сначала получаем информацию о доступных субтитрах
             const infoResult = await ytdlp(url, baseOpts);
@@ -1410,7 +1410,7 @@ class ContentService {
                     output: tempSubsFile.replace('.vtt', ''),
                     quiet: true,
                     noWarnings: true,
-                });
+                } as any);
                 
                 // Ищем скачанный файл субтитров
                 const glob = await import('glob');
@@ -1457,7 +1457,7 @@ class ContentService {
                         output: tempSubsFile.replace('.vtt', ''),
                         quiet: true,
                         noWarnings: true,
-                    });
+                    } as any);
                     
                     const glob = await import('glob');
                     const possibleFiles = glob.sync(`${tempSubsFile.replace('.vtt', '')}.*`);
@@ -1575,7 +1575,7 @@ class ContentService {
                 simulate: true,
                 skipDownload: true,
                 quiet: true,
-            });
+            } as any);
 
             const parsed = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
             const title = parsed?.title || parsed?.fulltitle;
