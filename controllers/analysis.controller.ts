@@ -659,53 +659,10 @@ export const processSingleUrlAnalysis = async (
 };
 
 const handleAnalysisRequest = async (req: Request, res: Response): Promise<Response> => {
-    // Keep-alive механизм для длительных запросов (Railway закрывает соединения через ~60-120 секунд)
-    // Устанавливаем заголовки для поддержания соединения активным
+    // Устанавливаем заголовки для поддержания соединения активным (только один раз, до отправки ответа)
     if (!res.headersSent) {
         res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no'); // Отключаем буферизацию в nginx (если используется)
     }
-    
-    let keepAliveInterval: NodeJS.Timeout | null = null;
-    
-    const startKeepAlive = () => {
-        // Отправляем heartbeat каждые 20 секунд через заголовки
-        // Это помогает Railway понять, что соединение активно, без отправки данных в тело
-        keepAliveInterval = setInterval(() => {
-            try {
-                if (res.writable && !res.writableEnded && !res.destroyed && !res.headersSent) {
-                    // Отправляем заголовок X-Progress для поддержания соединения
-                    res.setHeader('X-Progress', `heartbeat-${Date.now()}`);
-                } else if (res.writableEnded || res.destroyed) {
-                    // Соединение закрыто, останавливаем keep-alive
-                    if (keepAliveInterval) {
-                        clearInterval(keepAliveInterval);
-                        keepAliveInterval = null;
-                    }
-                }
-            } catch (e) {
-                // Игнорируем ошибки
-                if (keepAliveInterval) {
-                    clearInterval(keepAliveInterval);
-                    keepAliveInterval = null;
-                }
-            }
-        }, 20000); // Каждые 20 секунд
-    };
-    
-    const stopKeepAlive = () => {
-        if (keepAliveInterval) {
-            clearInterval(keepAliveInterval);
-            keepAliveInterval = null;
-        }
-    };
-    
-    // Запускаем keep-alive сразу после начала обработки
-    startKeepAlive();
-    
-    // Останавливаем keep-alive при завершении запроса
-    res.on('close', stopKeepAlive);
-    res.on('finish', stopKeepAlive);
     
     try {
         const { urls: urlInput, interests, mode } = req.body;
@@ -946,9 +903,6 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             }
         }
 
-        // Останавливаем keep-alive перед отправкой ответа
-        stopKeepAlive();
-        
         // Логируем финальные результаты
         console.log('✅ ANALYSIS COMPLETED. Results:', results.map(r => ({
             url: r.originalUrl,
@@ -959,9 +913,6 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
         return res.status(200).json(results);
 
     } catch (error) {
-        // Останавливаем keep-alive при ошибке
-        stopKeepAlive();
-        
         console.error('❌ Error in handleAnalysisRequest:', error);
         const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
         
