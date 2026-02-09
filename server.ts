@@ -93,6 +93,15 @@ app.get('/', (req: Request, res: Response) => {
     res.send('API is running...');
 });
 
+// Health check endpoint для Railway и других платформ
+app.get('/health', (req: Request, res: Response) => {
+    res.status(200).json({ 
+        status: 'ok', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
 // Error handling middleware (must be last)
 app.use((err: any, req: Request, res: Response, next: any) => {
     // Игнорируем ошибки закрытого соединения (клиент закрыл соединение до завершения запроса)
