@@ -57,29 +57,24 @@ class ContentService {
             if (videoPlatform === 'youtube') {
                 console.log('🎬 [YouTube] Attempting to extract video transcript (full content)...');
                 
-                // Метод 1: Puppeteer (открывает браузер и извлекает транскрипт со страницы) - ПРИОРИТЕТНЫЙ
+                // Метод 1: yt-dlp для извлечения субтитров (с cookies, самый надежный)
                 try {
-                    console.log('   [1/4] Trying Puppeteer (browser-based) for transcript...');
-                    // Увеличиваем таймаут до 60 секунд для Puppeteer
-                    const transcriptText = await Promise.race([
-                        this.getYouTubeTranscript(url),
-                        new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
-                        )
-                    ]);
-                    
+                    const cookiesOpts = this.getYtDlpCookiesOptions();
+                    const hasCookies = Object.keys(cookiesOpts).length > 0;
+                    console.log(`   [1/3] Trying yt-dlp for transcript extraction${hasCookies ? ' (with cookies)' : ''}...`);
+                    const transcriptText = await this.extractTranscriptWithYtDlp(url);
                     if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
+                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
                         return { content: transcriptText, sourceType: 'transcript' };
                     }
-                } catch (puppeteerError: any) {
-                    const errorMsg = puppeteerError.message || 'Unknown error';
-                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
+                } catch (ytDlpError: any) {
+                    const errorMsg = ytDlpError.message || 'Unknown error';
+                    console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg}`);
                 }
                 
                 // Метод 2: Библиотека youtube-transcript (быстрый, не требует браузер)
                 try {
-                    console.log('   [2/4] Trying youtube-transcript library...');
+                    console.log('   [2/3] Trying youtube-transcript library...');
                     const { YoutubeTranscript } = await import('youtube-transcript');
                     
                     // Пробуем сначала без указания языка (автоматический выбор)
@@ -120,33 +115,24 @@ class ContentService {
                     }
                 }
                 
-                // Метод 3: ScrapingBee API для получения HTML и извлечения транскрипта
+                // Метод 3: Puppeteer (открывает браузер и извлекает транскрипт со страницы) - последний fallback
                 try {
-                    console.log('   [3/4] Trying ScrapingBee API for transcript...');
-                    const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                    if (scrapingBeeContent) {
-                        console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
-                        const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
-                        }
-                    }
-                } catch (scrapingBeeError: any) {
-                    console.log(`   ⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
-                }
-                
-                // Метод 4: yt-dlp для извлечения субтитров (если доступны)
-                try {
-                    console.log('   [4/4] Trying yt-dlp for transcript extraction...');
-                    const transcriptText = await this.extractTranscriptWithYtDlp(url);
+                    console.log('   [3/3] Trying Puppeteer (browser-based) for transcript...');
+                    // Увеличиваем таймаут до 60 секунд для Puppeteer
+                    const transcriptText = await Promise.race([
+                        this.getYouTubeTranscript(url),
+                        new Promise<string>((_, reject) => 
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
+                        )
+                    ]);
+                    
                     if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
+                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
                         return { content: transcriptText, sourceType: 'transcript' };
                     }
-                } catch (ytDlpError: any) {
-                    const errorMsg = ytDlpError.message || 'Unknown error';
-                    console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg}`);
+                } catch (puppeteerError: any) {
+                    const errorMsg = puppeteerError.message || 'Unknown error';
+                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
                 }
                 
                 // Все методы получения транскрипта провалились
@@ -197,40 +183,10 @@ class ContentService {
                 }
             } catch (error: any) {
                 console.warn(`⚠️ yt-dlp metadata extraction failed for ${videoPlatform}: ${error.message}`);
-                console.log(`Falling back to Puppeteer extraction...`);
+                console.log(`Falling back to YouTube API...`);
             }
 
-            // 4. FALLBACK: Метаданные через ScrapingBee (не требует браузеров)
-            try {
-                const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                if (scrapingBeeContent) {
-                    const cheerio = await import('cheerio');
-                    const $ = cheerio.load(scrapingBeeContent);
-                    
-                    // Извлекаем метаданные (title, description)
-                    const title = $('meta[property="og:title"]').attr('content') || 
-                                 $('title').text() || 
-                                 $('h1').first().text();
-                    const description = $('meta[property="og:description"]').attr('content') || 
-                                      $('meta[name="description"]').attr('content') || '';
-                    
-                    if (title || description) {
-                        const contentParts: string[] = [];
-                        if (title) contentParts.push(`Название: ${title.trim()}`);
-                        if (description) contentParts.push(`\n\nОписание: ${description.trim()}`);
-                        
-                        const content = contentParts.join('') + 
-                            '\n\n⚠️ ВАЖНО: Это только метаданные видео (название, описание). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных.';
-                        
-                        console.log(`✓ Using ScrapingBee metadata for ${videoPlatform}`);
-                        return { content, sourceType: 'metadata' };
-                    }
-                }
-            } catch (scrapingBeeError: any) {
-                console.log(`⚠️ ScrapingBee metadata extraction failed: ${scrapingBeeError.message}`);
-            }
-            
-            // 5. FALLBACK: YouTube Data API v3 (для YouTube, не требует Puppeteer/cookies)
+            // 4. FALLBACK: YouTube Data API v3 (для YouTube, не требует Puppeteer/cookies)
             if (videoPlatform === 'youtube') {
                 try {
                     const youtubeApiMetadata = await this.fetchMetadataWithYouTubeAPI(url);
@@ -243,7 +199,7 @@ class ContentService {
                 }
             }
 
-            // 6. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
             try {
                 const metadata = await this.extractVideoMetadata(url, videoPlatform);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
@@ -259,7 +215,7 @@ class ContentService {
                 }
             }
 
-            // 7. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
+            // 6. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
             if (videoPlatform === 'youtube') {
                 try {
                     const videoInfo = await play.video_info(url);
@@ -272,7 +228,7 @@ class ContentService {
                 }
             }
             
-            // 8. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
+            // 7. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
             // Это гарантирует, что мы всегда получим хотя бы название и описание из og:tags
             try {
                 console.log(`🔄 Attempting final fallback: extracting basic metadata from page...`);
@@ -292,48 +248,8 @@ class ContentService {
                 sourceType: 'metadata' as const
             };
         } else {
-            // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
-            // Сначала пробуем ScrapingBee (не требует браузеров)
-            try {
-                const scrapingBeeContent = await this.extractWithScrapingBee(url);
-                if (scrapingBeeContent) {
-                    const cheerio = await import('cheerio');
-                    const $ = cheerio.load(scrapingBeeContent);
-                    
-                    // Извлекаем основной контент статьи
-                    const mainContentSelectors = ['article', 'main', '.post-content', '.article-body', 'body'];
-                    let mainEl = null;
-                    for (const selector of mainContentSelectors) {
-                        const element = $(selector).first();
-                        if (element.length > 0) {
-                            mainEl = element;
-                            break;
-        }
-    }
-
-                    if (mainEl && mainEl.length > 0) {
-                        // Удаляем ненужные элементы
-                        mainEl.find('script, style, nav, header, footer, aside, form, button, .comments, #comments').remove();
-                        
-                        // Извлекаем текст
-                        const paragraphs = mainEl.find('p, h1, h2, h3, li, pre, code').toArray();
-                        const content = paragraphs
-                            .map((el: any) => $(el).text().trim())
-                            .filter((text: string) => text.length > 20)
-                            .join('\n\n');
-                        
-                        if (content.trim().length > 100) {
-                            console.log(`✓ Using ScrapingBee for article (${content.length} chars)`);
-                            return { content, sourceType: 'article' };
-                        }
-                    }
-                }
-            } catch (scrapingBeeError: any) {
-                console.log(`⚠️ ScrapingBee failed for article: ${scrapingBeeError.message}`);
-                console.log(`   Trying Puppeteer fallback...`);
-            }
-            
-            // Fallback на Puppeteer
+            // ... (Статья - пробуем Puppeteer)
+            // Пробуем Puppeteer для извлечения статьи
             try {
                 return await this.scrapeArticleWithPuppeteer(url);
             } catch (puppeteerError: any) {
@@ -1461,6 +1377,8 @@ class ContentService {
             const ytdlp = (await import('yt-dlp-exec')).default;
             
             const cookiesOpts = this.getYtDlpCookiesOptions();
+            const hasCookies = Object.keys(cookiesOpts).length > 0;
+            
             // Сначала получаем информацию о доступных субтитрах
             const infoResult = await ytdlp(url, {
                 ...cookiesOpts,
@@ -1516,7 +1434,7 @@ class ContentService {
                     await fs.remove(subFile);
                     
                     if (subContent && subContent.length > 50) {
-                        console.log(`✓ Extracted transcript via yt-dlp: ${subContent.length} chars`);
+                        console.log(`✓ Extracted transcript via yt-dlp${hasCookies ? ' (with cookies)' : ''}: ${subContent.length} chars - FULL VIDEO TRANSCRIPT`);
                         return subContent;
                     }
                 }
@@ -1556,7 +1474,7 @@ class ContentService {
                         await fs.remove(subFile);
                         
                         if (subContent && subContent.length > 50) {
-                            console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${subContent.length} chars`);
+                            console.log(`✓ Extracted transcript via yt-dlp${hasCookies ? ' (with cookies)' : ''} (manual subs): ${subContent.length} chars - FULL VIDEO TRANSCRIPT`);
                             return subContent;
                         }
                     }
