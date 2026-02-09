@@ -31,17 +31,24 @@ class ContentService {
             if (videoPlatform === 'youtube') {
                 console.log('🎬 [YouTube] Attempting to extract video transcript (full content)...');
                 
-                // Метод 1: yt-dlp с cookies (наиболее надёжный при наличии Chrome с залогиненным YouTube)
+                // Метод 1: Puppeteer (открывает браузер и извлекает транскрипт со страницы) - ПРИОРИТЕТНЫЙ
                 try {
-                    console.log('   [1/4] Trying yt-dlp for transcript extraction (with cookies)...');
-                    const transcriptText = await this.extractTranscriptWithYtDlp(url);
-                    const normalizedTranscript = this.normalizeTranscript(transcriptText);
-                    if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${normalizedTranscript.length} chars)`);
-                        return { content: normalizedTranscript, sourceType: 'transcript' };
+                    console.log('   [1/4] Trying Puppeteer (browser-based) for transcript...');
+                    // Увеличиваем таймаут до 60 секунд для Puppeteer
+                    const transcriptText = await Promise.race([
+                        this.getYouTubeTranscript(url),
+                        new Promise<string>((_, reject) => 
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
+                        )
+                    ]);
+                    
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
                     }
-                } catch (ytDlpError: any) {
-                    console.log(`   ⚠️ yt-dlp failed: ${ytDlpError.message}`);
+                } catch (puppeteerError: any) {
+                    const errorMsg = puppeteerError.message || 'Unknown error';
+                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
                 }
                 
                 // Метод 2: Библиотека youtube-transcript (быстрый, не требует браузер)
@@ -53,11 +60,10 @@ class ContentService {
                     try {
                         const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
                         const transcriptText = transcriptItems.map(item => item.text).join(' ');
-                        const normalizedTranscript = this.normalizeTranscript(transcriptText);
                         
-                        if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                            console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${normalizedTranscript.length} chars)`);
-                            return { content: normalizedTranscript, sourceType: 'transcript' };
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
                         }
                     } catch (autoError: any) {
                         // Если автоматический выбор не сработал, пробуем с конкретными языками
@@ -67,11 +73,10 @@ class ContentService {
                                 console.log(`   Trying youtube-transcript with language: ${lang}...`);
                                 const transcriptItems = await YoutubeTranscript.fetchTranscript(url, { lang });
                                 const transcriptText = transcriptItems.map(item => item.text).join(' ');
-                                const normalizedTranscript = this.normalizeTranscript(transcriptText);
                                 
-                                if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                                    console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${lang}, ${normalizedTranscript.length} chars)`);
-                                    return { content: normalizedTranscript, sourceType: 'transcript' };
+                                if (transcriptText && transcriptText.trim().length > 50) {
+                                    console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${lang}, ${transcriptText.length} chars)`);
+                                    return { content: transcriptText, sourceType: 'transcript' };
                                 }
                             } catch (langError: any) {
                                 // Пробуем следующий язык
@@ -89,56 +94,33 @@ class ContentService {
                     }
                 }
                 
-                // Метод 3: Парсинг HTML страницы (ytInitialPlayerResponse → caption URL → XML)
-                // Точная расшифровка из субтитров видео, без браузера и UI
+                // Метод 3: ScrapingBee API для получения HTML и извлечения транскрипта
                 try {
-                    console.log('   [3/5] Trying HTML fetch + caption track parsing...');
-                    const transcriptText = await this.extractTranscriptViaHtmlFetch(url);
-                    const normalizedTranscript = this.normalizeTranscript(transcriptText);
-                    if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                        console.log(`✓✓✓ SUCCESS: Using transcript from page HTML (${normalizedTranscript.length} chars)`);
-                        return { content: normalizedTranscript, sourceType: 'transcript' };
-                    }
-                } catch (htmlFetchError: any) {
-                    console.log(`   ⚠️ HTML fetch failed: ${htmlFetchError.message}`);
-                }
-                
-                // Метод 4: Puppeteer (браузер — резервный метод, требует больше времени)
-                try {
-                    console.log('   [4/5] Trying Puppeteer (browser-based) for transcript...');
-                    const transcriptText = await Promise.race([
-                        this.getYouTubeTranscript(url),
-                        new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 240000) // 4 минуты (больше времени для Puppeteer)
-                        )
-                    ]);
-                    const normalizedTranscript = this.normalizeTranscript(transcriptText);
-                    
-                    if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${normalizedTranscript.length} chars)`);
-                        return { content: normalizedTranscript, sourceType: 'transcript' };
-                    }
-                } catch (puppeteerError: any) {
-                    const errorMsg = puppeteerError.message || 'Unknown error';
-                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
-                }
-                
-                // Метод 5: Whisper — скачивание аудио + транскрибация (API или локальная модель)
-                const disableTranscription = process.env.DISABLE_VIDEO_TRANSCRIPTION === 'true';
-                if (!disableTranscription) {
-                    try {
-                        console.log('   [5/6] Trying Whisper audio transcription (download + transcribe)...');
-                        const transcriptText = await this.transcribeVideo(url, 'youtube');
-                        const normalizedTranscript = this.normalizeTranscript(transcriptText);
-                        if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                            console.log(`✓✓✓ SUCCESS: Using Whisper transcription (${normalizedTranscript.length} chars)`);
-                            return { content: normalizedTranscript, sourceType: 'transcript' };
+                    console.log('   [3/4] Trying ScrapingBee API for transcript...');
+                    const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                    if (scrapingBeeContent) {
+                        console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
+                        const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
+                        if (transcriptText && transcriptText.trim().length > 50) {
+                            console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
+                            return { content: transcriptText, sourceType: 'transcript' };
                         }
-                    } catch (whisperError: any) {
-                        console.log(`   ⚠️ Whisper failed: ${whisperError.message}`);
                     }
-                } else {
-                    console.log('   ⏭️ Whisper transcription skipped (DISABLE_VIDEO_TRANSCRIPTION=true)');
+                } catch (scrapingBeeError: any) {
+                    console.log(`   ⚠️ ScrapingBee failed: ${scrapingBeeError.message}`);
+                }
+                
+                // Метод 4: yt-dlp для извлечения субтитров (если доступны)
+                try {
+                    console.log('   [4/4] Trying yt-dlp for transcript extraction...');
+                    const transcriptText = await this.extractTranscriptWithYtDlp(url);
+                    if (transcriptText && transcriptText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
+                        return { content: transcriptText, sourceType: 'transcript' };
+                    }
+                } catch (ytDlpError: any) {
+                    const errorMsg = ytDlpError.message || 'Unknown error';
+                    console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg}`);
                 }
                 
                 // Все методы получения транскрипта провалились
@@ -153,12 +135,11 @@ class ContentService {
                 console.log(`🎬 [${videoPlatform}] Attempting automatic transcription to get full video content...`);
                 try {
                     const transcribedText = await this.transcribeVideo(url, videoPlatform);
-                    const normalizedTranscript = this.normalizeTranscript(transcribedText);
-                    if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                        console.log(`✓✓✓ SUCCESS: Using automatic transcription (${normalizedTranscript.length} chars) - full video content extracted`);
-                        return { content: normalizedTranscript, sourceType: 'transcript' };
+                    if (transcribedText && transcribedText.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Using automatic transcription (${transcribedText.length} chars) - full video content extracted`);
+                        return { content: transcribedText, sourceType: 'transcript' };
                     } else {
-                        console.warn(`⚠️ Transcription returned empty or too short text (${normalizedTranscript?.length || 0} chars)`);
+                        console.warn(`⚠️ Transcription returned empty or too short text (${transcribedText?.length || 0} chars)`);
                     }
                 } catch (error: any) {
                     const errorMsg = error.message || 'Unknown error';
@@ -178,8 +159,7 @@ class ContentService {
             // ============================================
             // ПРИОРИТЕТ 2: МЕТАДАННЫЕ (только если транскрипт недоступен)
             // ============================================
-            console.log(`⚠️ [${videoPlatform}] ⚠️⚠️⚠️ ALL TRANSCRIPT METHODS FAILED ⚠️⚠️⚠️`);
-            console.log(`📋 [${videoPlatform}] Falling back to metadata extraction (title + description only, NOT full video content)...`);
+            console.log(`📋 [${videoPlatform}] Transcript unavailable. Falling back to metadata extraction...`);
 
 
             // 3. ПРИОРИТЕТНЫЙ FALLBACK: Метаданные через yt-dlp (самый быстрый и надежный способ получить название/описание)
@@ -194,7 +174,37 @@ class ContentService {
                 console.log(`Falling back to Puppeteer extraction...`);
             }
 
-            // 4. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // 4. FALLBACK: Метаданные через ScrapingBee (не требует браузеров)
+            try {
+                const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                if (scrapingBeeContent) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(scrapingBeeContent);
+                    
+                    // Извлекаем метаданные (title, description)
+                    const title = $('meta[property="og:title"]').attr('content') || 
+                                 $('title').text() || 
+                                 $('h1').first().text();
+                    const description = $('meta[property="og:description"]').attr('content') || 
+                                      $('meta[name="description"]').attr('content') || '';
+                    
+                    if (title || description) {
+                        const contentParts: string[] = [];
+                        if (title) contentParts.push(`Название: ${title.trim()}`);
+                        if (description) contentParts.push(`\n\nОписание: ${description.trim()}`);
+                        
+                        const content = contentParts.join('') + 
+                            '\n\n⚠️ ВАЖНО: Это только метаданные видео (название, описание). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных.';
+                        
+                        console.log(`✓ Using ScrapingBee metadata for ${videoPlatform}`);
+                        return { content, sourceType: 'metadata' };
+                    }
+                }
+            } catch (scrapingBeeError: any) {
+                console.log(`⚠️ ScrapingBee metadata extraction failed: ${scrapingBeeError.message}`);
+            }
+            
+            // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
             try {
                 const metadata = await this.extractVideoMetadata(url, videoPlatform);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
@@ -205,7 +215,7 @@ class ContentService {
                 console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${error.message}`);
             }
 
-            // 5. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
+            // 6. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
             if (videoPlatform === 'youtube') {
                 try {
                     const videoInfo = await play.video_info(url);
@@ -238,7 +248,48 @@ class ContentService {
                 sourceType: 'metadata' as const
             };
         } else {
-            // Статья — парсинг через Puppeteer
+            // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
+            // Сначала пробуем ScrapingBee (не требует браузеров)
+            try {
+                const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                if (scrapingBeeContent) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(scrapingBeeContent);
+                    
+                    // Извлекаем основной контент статьи
+                    const mainContentSelectors = ['article', 'main', '.post-content', '.article-body', 'body'];
+                    let mainEl = null;
+                    for (const selector of mainContentSelectors) {
+                        const element = $(selector).first();
+                        if (element.length > 0) {
+                            mainEl = element;
+                            break;
+        }
+    }
+
+                    if (mainEl && mainEl.length > 0) {
+                        // Удаляем ненужные элементы
+                        mainEl.find('script, style, nav, header, footer, aside, form, button, .comments, #comments').remove();
+                        
+                        // Извлекаем текст
+                        const paragraphs = mainEl.find('p, h1, h2, h3, li, pre, code').toArray();
+                        const content = paragraphs
+                            .map((el: any) => $(el).text().trim())
+                            .filter((text: string) => text.length > 20)
+                            .join('\n\n');
+                        
+                        if (content.trim().length > 100) {
+                            console.log(`✓ Using ScrapingBee for article (${content.length} chars)`);
+                            return { content, sourceType: 'article' };
+                        }
+                    }
+                }
+            } catch (scrapingBeeError: any) {
+                console.log(`⚠️ ScrapingBee failed for article: ${scrapingBeeError.message}`);
+                console.log(`   Trying Puppeteer fallback...`);
+            }
+            
+            // Fallback на Puppeteer
             try {
                 return await this.scrapeArticleWithPuppeteer(url);
             } catch (puppeteerError: any) {
@@ -501,59 +552,91 @@ class ContentService {
     }
 
     /**
-     * Нормализует транскрипт: очищает от временных меток, лишних пробелов и форматирует текст
+     * Извлекает HTML контент через ScrapingBee API (не требует браузеров)
      */
-    private normalizeTranscript(text: string | null): string | null {
-        if (!text) return null;
-        
-        let normalized = text.trim();
-        
-        // Удаляем временные метки в формате [00:00] или (00:00) или 00:00:00
-        normalized = normalized.replace(/\[?\d{1,2}:\d{2}(?::\d{2})?\]?/g, '');
-        
-        // Удаляем временные метки в формате <00:00> или (00:00)
-        normalized = normalized.replace(/[<\(]\d{1,2}:\d{2}(?::\d{2})?[>\)]/g, '');
-        
-        // Удаляем множественные пробелы и заменяем на один
-        normalized = normalized.replace(/\s+/g, ' ');
-        
-        // Удаляем пробелы в начале и конце после очистки
-        normalized = normalized.trim();
-        
-        // Удаляем пустые строки и лишние переносы строк
-        normalized = normalized.replace(/\n\s*\n/g, '\n');
-        
-        // Удаляем специальные символы, которые могут остаться от парсинга
-        normalized = normalized.replace(/[›»«]/g, '');
-        
-        return normalized.length > 0 ? normalized : null;
-    }
-
-    /**
-     * Загружает HTML страницы YouTube и извлекает транскрипт через ytInitialPlayerResponse.
-     * Точная расшифровка из caption tracks (XML), не метаданные.
-     */
-    private async extractTranscriptViaHtmlFetch(url: string): Promise<string | null> {
-        try {
-            const axios = await import('axios');
-            const response = await axios.default.get(url, {
-                timeout: 20000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-                },
-                maxRedirects: 5,
-                validateStatus: (s) => s < 500,
-            });
-            if (response.status !== 200 || typeof response.data !== 'string') {
-                return null;
-            }
-            return await this.extractTranscriptFromHTML(response.data, url);
-        } catch (e: any) {
-            console.log(`   HTML fetch error: ${e.message || 'Unknown'}`);
+    private async extractWithScrapingBee(url: string): Promise<string | null> {
+        // Поддержка нескольких API ключей через переменную окружения (разделенные запятыми)
+        const apiKeysEnv = process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS;
+        if (!apiKeysEnv) {
+            console.log('⚠️ SCRAPINGBEE_API_KEY or SCRAPINGBEE_API_KEYS not set, skipping ScrapingBee');
             return null;
         }
+
+        // Разбиваем ключи по запятым и очищаем от пробелов
+        const apiKeys = apiKeysEnv.split(',').map(key => key.trim()).filter(key => key.length > 0);
+        
+        if (apiKeys.length === 0) {
+            console.log('⚠️ No valid ScrapingBee API keys found');
+            return null;
+        }
+
+        const axios = await import('axios');
+        const apiUrl = 'https://app.scrapingbee.com/api/v1/';
+
+        // Пробуем каждый ключ по очереди
+        for (let i = 0; i < apiKeys.length; i++) {
+            const apiKey = apiKeys[i];
+            const isLastKey = i === apiKeys.length - 1;
+            
+            try {
+                if (apiKeys.length > 1) {
+                    console.log(`Trying ScrapingBee API (key ${i + 1}/${apiKeys.length})...`);
+                } else {
+                    console.log('Trying ScrapingBee API...');
+                }
+                
+                const params = new URLSearchParams({
+                    'api_key': apiKey,
+                    'url': url,
+                    'render_js': 'true', // Выполняет JavaScript на странице
+                    'premium_proxy': 'true', // Использует премиум прокси для обхода блокировок
+                    'country_code': 'us', // Страна прокси
+                });
+
+                const response = await axios.default.get(apiUrl, {
+                    params: params,
+                    timeout: 30000, // 30 секунд таймаут
+                });
+
+                if (response.data) {
+                    console.log('✓ ScrapingBee successfully fetched content');
+                    return typeof response.data === 'string' ? response.data : response.data.toString();
+                }
+            } catch (error: any) {
+                const status = error.response?.status;
+                const statusText = error.response?.statusText;
+                
+                // Обрабатываем разные типы ошибок
+                if (status === 401 || status === 403) {
+                    console.log(`⚠️ ScrapingBee API authentication error (${status}) for key ${i + 1}: Invalid API key or access denied`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else if (status === 429) {
+                    console.log(`⚠️ ScrapingBee API rate limit exceeded (429) for key ${i + 1}: Too many requests`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else if (status >= 500) {
+                    console.log(`⚠️ ScrapingBee API server error (${status}) for key ${i + 1}: ${statusText || error.message}`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                } else {
+                    console.log(`⚠️ ScrapingBee API error for key ${i + 1}: ${error.message || 'Unknown error'}`);
+                    if (!isLastKey) {
+                        console.log(`   Trying next API key...`);
+                        continue; // Пробуем следующий ключ
+                    }
+                }
+            }
+        }
+        
+        console.log(`❌ All ScrapingBee API keys failed`);
+        return null;
     }
 
     /**
@@ -571,7 +654,6 @@ class ContentService {
             }
 
             console.log(`🔍 Searching for transcript in HTML for video: ${videoId}`);
-            const triedUrls = new Set<string>();
 
             // Метод 1: Ищем транскрипт в JSON данных страницы (ytInitialPlayerResponse)
             const scripts = html.match(/<script[^>]*>([\s\S]*?)<\/script>/gi) || [];
@@ -646,12 +728,11 @@ class ContentService {
                                                     // Если декодирование не удалось, используем исходный URL
                                                 }
                                                 
-                                                if (triedUrls.has(captionUrl)) continue;
-                                                triedUrls.add(captionUrl);
                                                 console.log(`✓ Found caption track: ${captionTrack.languageCode || 'unknown'}`);
+                                                console.log(`   Attempting to download transcript from URL...`);
                                                 const transcript = await this.downloadTranscriptFromUrl(captionUrl);
-                                                if (transcript && transcript.length >= 30) {
-                                                    console.log(`✓✓✓ SUCCESS: Downloaded transcript from caption track (${transcript.length} chars) - FULL VIDEO TRANSCRIPT`);
+                                                if (transcript && transcript.trim().length > 50) {
+                                                    console.log(`✓✓✓ SUCCESS: Downloaded transcript from caption track (${transcript.length} chars)`);
                                                     return transcript;
                                                 } else {
                                                     console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
@@ -695,12 +776,11 @@ class ContentService {
                                                     // Если декодирование не удалось, используем исходный URL
                                                 }
                                                 
-                            if (triedUrls.has(decodedUrl)) continue;
-                            triedUrls.add(decodedUrl);
-                            console.log(`✓ Found caption URL via regex`);
+                            console.log(`✓ Found caption URL via regex: ${decodedUrl.substring(0, 100)}...`);
+                            console.log(`   Attempting to download transcript from URL...`);
                             const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                            if (transcript && transcript.length >= 30) {
-                                console.log(`✓✓✓ SUCCESS: Downloaded transcript via direct URL (${transcript.length} chars) - FULL VIDEO TRANSCRIPT`);
+                            if (transcript && transcript.trim().length > 50) {
+                                console.log(`✓✓✓ SUCCESS: Downloaded transcript via ScrapingBee (${transcript.length} chars)`);
                                 return transcript;
                             } else {
                                 console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
@@ -732,13 +812,21 @@ class ContentService {
                     const matches = html.matchAll(pattern);
                     for (const match of matches) {
                         if (match[1] && match[1].includes('timedtext')) {
-                            const decodedUrl = this.decodeCaptionUrl(match[1]);
-                            if (triedUrls.has(decodedUrl)) continue;
-                            triedUrls.add(decodedUrl);
-                            console.log(`✓ Found transcript URL in HTML`);
+                            // Декодируем Unicode escape sequences в URL
+                            let decodedUrl = match[1];
+                            try {
+                                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (m: string, hex: string) => {
+                                    return String.fromCharCode(parseInt(hex, 16));
+                                });
+                            } catch (e) {
+                                // Если декодирование не удалось, используем исходный URL
+                            }
+                            
+                            console.log(`✓ Found transcript URL directly in HTML`);
+                            console.log(`   Attempting to download transcript from URL...`);
                             const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                            if (transcript && transcript.length >= 30) {
-                                console.log(`✓✓✓ SUCCESS: Downloaded transcript directly from HTML (${transcript.length} chars) - FULL VIDEO TRANSCRIPT`);
+                            if (transcript && transcript.trim().length > 50) {
+                                console.log(`✓✓✓ SUCCESS: Downloaded transcript directly from HTML (${transcript.length} chars)`);
                                 return transcript;
                             } else {
                                 console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
@@ -753,18 +841,18 @@ class ContentService {
             // Метод 3: Прямой запрос к YouTube API для получения транскрипта
             console.log('   Trying YouTube API method...');
             try {
-                    const transcriptUrl = await this.getYouTubeTranscriptUrl(videoId);
-                    if (transcriptUrl && !triedUrls.has(transcriptUrl)) {
-                        triedUrls.add(transcriptUrl);
-                        console.log(`✓ Got transcript URL from API`);
-                        const transcript = await this.downloadTranscriptFromUrl(transcriptUrl);
-                        if (transcript && transcript.length >= 30) {
-                            console.log(`✓✓✓ SUCCESS: Downloaded transcript via YouTube API (${transcript.length} chars) - FULL VIDEO TRANSCRIPT`);
-                            return transcript;
-                        } else {
-                            console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
-                        }
+                const transcriptUrl = await this.getYouTubeTranscriptUrl(videoId);
+                if (transcriptUrl) {
+                    console.log(`✓ Got transcript URL from API`);
+                    console.log(`   Attempting to download transcript from URL...`);
+                    const transcript = await this.downloadTranscriptFromUrl(transcriptUrl);
+                    if (transcript && transcript.trim().length > 50) {
+                        console.log(`✓✓✓ SUCCESS: Downloaded transcript via YouTube API (${transcript.length} chars)`);
+                        return transcript;
+                    } else {
+                        console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
                     }
+                }
             } catch (e) {
                 console.log(`   YouTube API method failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
             }
@@ -778,203 +866,119 @@ class ContentService {
     }
 
     /**
-     * Загружает транскрипт по URL (XML или json3).
-     * YouTube может возвращать пустой ответ при прямом запросе — используйте downloadTranscriptViaPage для контекста браузера.
+     * Загружает транскрипт по URL
      */
     private async downloadTranscriptFromUrl(captionUrl: string): Promise<string | null> {
-        const decodedUrl = this.decodeCaptionUrl(captionUrl);
-        const headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/xml,application/xml,application/json,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-            'Referer': 'https://www.youtube.com/',
-            'Origin': 'https://www.youtube.com',
-        };
-
-        // Пробуем разные форматы и параметры для получения транскрипта
-        const urlsToTry = [
-            decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=json3&lang=ru',
-            decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=json3',
-            decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=srv3&lang=ru',
-            decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'lang=ru',
-            decodedUrl, // Оригинальный URL в конце
-        ];
-
-        for (const url of urlsToTry) {
-            const result = await this.fetchAndParseTranscript(url, headers);
-            if (result) return result;
-        }
-        return null;
-    }
-
-    private decodeCaptionUrl(captionUrl: string): string {
-        let decoded = captionUrl;
         try {
-            decoded = decoded.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
-            decoded = decodeURIComponent(decoded);
-        } catch { /* keep original */ }
-        return decoded;
-    }
-
-    private async fetchAndParseTranscript(url: string, headers: Record<string, string>): Promise<string | null> {
-        try {
-            console.log(`   📥 Downloading transcript from: ${url.substring(0, 120)}...`);
+            // Декодируем Unicode escape sequences в URL (например, \u0026 -> &)
+            let decodedUrl = captionUrl;
+            try {
+                // Заменяем Unicode escape sequences
+                decodedUrl = decodedUrl.replace(/\\u([0-9a-fA-F]{4})/g, (match: string, hex: string) => {
+                    return String.fromCharCode(parseInt(hex, 16));
+                });
+                // Также декодируем стандартные escape sequences
+                decodedUrl = decodeURIComponent(decodedUrl);
+            } catch (decodeError) {
+                // Если декодирование не удалось, используем исходный URL
+                console.log(`   Warning: Could not decode URL, using original`);
+            }
+            
+            console.log(`   📥 Downloading transcript from: ${decodedUrl.substring(0, 150)}...`);
+            
             const axios = await import('axios');
-            const res = await axios.default.get(url, {
-                timeout: 20000,
-                headers,
+            const transcriptResponse = await axios.default.get(decodedUrl, {
+                timeout: 15000, // Увеличено с 10 до 15 секунд
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'text/xml,application/xml,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                    'Referer': 'https://www.youtube.com/' // Добавляем Referer для YouTube
+                },
                 maxRedirects: 5,
-                validateStatus: (s) => s < 500,
-                responseType: 'text', // Явно указываем text для правильной обработки
+                validateStatus: (status) => status < 500 // Принимаем все статусы кроме 5xx
             });
             
-            if (res.status !== 200) {
-                console.log(`   ⚠️ Transcript URL returned status ${res.status}`);
-                return null;
-            }
-
-            const data = res.data;
-            if (!data || (typeof data === 'string' && data.trim().length === 0)) {
-                console.log(`   ⚠️ Transcript URL returned empty response`);
+            const status = transcriptResponse.status;
+            if (status !== 200) {
+                console.log(`   ⚠️ Transcript URL returned status ${status}: ${decodedUrl.substring(0, 100)}...`);
                 return null;
             }
             
-            // Логируем первые символы для диагностики
-            const preview = typeof data === 'string' ? data.substring(0, 200) : JSON.stringify(data).substring(0, 200);
-            console.log(`   📄 Response preview: ${preview}...`);
-
-            // XML формат
-            if (data.includes('<text')) {
-                const items: string[] = [];
-                for (const m of data.matchAll(/<text[^>]*>([^<]+)<\/text>/g)) {
-                    const t = m[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
-                    if (t) items.push(t);
+            const transcriptXml = transcriptResponse.data;
+            
+            // Проверяем, что получили XML
+            if (typeof transcriptXml !== 'string' || !transcriptXml.includes('<text')) {
+                console.log(`   ⚠️ Transcript response is not valid XML (length: ${transcriptXml?.length || 0})`);
+                // Возможно это HTML страница с ошибкой, пробуем найти текст в HTML
+                if (typeof transcriptXml === 'string' && transcriptXml.includes('<html')) {
+                    console.log(`   → Got HTML instead of XML, transcript may be unavailable`);
                 }
-                if (items.length > 0) {
-                    const text = items.join(' ');
-                    const normalized = this.normalizeTranscript(text);
-                    if (normalized) {
-                        console.log(`✓ Extracted ${items.length} items from XML (${normalized.length} chars)`);
-                        return normalized;
-                    }
+                return null;
+            }
+            
+            const transcriptItems: string[] = [];
+            
+            // Парсим XML транскрипта (YouTube использует формат timedtext)
+            const textMatches = transcriptXml.matchAll(/<text[^>]*>([^<]+)<\/text>/g);
+            for (const match of textMatches) {
+                const text = match[1]
+                    .replace(/&amp;/g, '&')
+                    .replace(/&lt;/g, '<')
+                    .replace(/&gt;/g, '>')
+                    .replace(/&quot;/g, '"')
+                    .replace(/&#39;/g, "'")
+                    .trim();
+                if (text) {
+                    transcriptItems.push(text);
                 }
             }
-
-            // json3 формат
-            if (data.includes('"events"') || data.startsWith('{')) {
-                try {
-                    const json = typeof data === 'string' ? JSON.parse(data) : data;
-                    const events = json?.events || [];
-                    const items: string[] = [];
-                    for (const ev of events) {
-                        const segs = ev?.segs || [];
-                        for (const seg of segs) {
-                            const utf8 = seg?.utf8;
-                            if (utf8 && typeof utf8 === 'string' && !utf8.match(/^[\s\u00a0]*$/)) {
-                                items.push(utf8.replace(/\n/g, ' ').trim());
-                            }
-                        }
+            
+            if (transcriptItems.length > 0) {
+                const fullTranscript = transcriptItems.join(' ');
+                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items (${fullTranscript.length} chars)`);
+                return fullTranscript;
+            } else {
+                console.log(`   ⚠️ No transcript items found in XML (XML length: ${transcriptXml.length})`);
+                // Пробуем альтернативный формат парсинга
+                const altMatches = transcriptXml.matchAll(/<text[^>]*start="[^"]*"[^>]*>([^<]+)<\/text>/g);
+                for (const match of altMatches) {
+                    const text = match[1]
+                        .replace(/&amp;/g, '&')
+                        .replace(/&lt;/g, '<')
+                        .replace(/&gt;/g, '>')
+                        .replace(/&quot;/g, '"')
+                        .replace(/&#39;/g, "'")
+                        .trim();
+                    if (text) {
+                        transcriptItems.push(text);
                     }
-                    if (items.length > 0) {
-                        const text = items.join(' ').replace(/\s+/g, ' ').trim();
-                        const normalized = this.normalizeTranscript(text);
-                        if (normalized) {
-                            console.log(`✓ Extracted ${items.length} items from json3 (${normalized.length} chars)`);
-                            return normalized;
-                        }
-                    }
-                } catch (e) { /* ignore */ }
+                }
+                if (transcriptItems.length > 0) {
+                    const fullTranscript = transcriptItems.join(' ');
+                    console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items using alternative parsing (${fullTranscript.length} chars)`);
+                    return fullTranscript;
+                }
             }
-        } catch (e: any) {
-            if (!e.message?.includes('timeout')) {
-                console.log(`   ⚠️ Fetch failed: ${e.message?.substring(0, 80)}`);
+            
+            return null;
+        } catch (error: any) {
+            const status = error.response?.status;
+            const errorMessage = error.message || 'Unknown error';
+            
+            if (status === 404) {
+                console.log(`   ⚠️ Transcript URL returned 404 (may be expired or invalid): ${captionUrl.substring(0, 100)}...`);
+            } else if (status === 403) {
+                console.log(`   ⚠️ Transcript URL returned 403 (access forbidden): ${captionUrl.substring(0, 100)}...`);
+            } else if (errorMessage.includes('timeout') || errorMessage.includes('ECONNABORTED')) {
+                console.log(`   ⚠️ Transcript download timeout: ${errorMessage}`);
+            } else if (errorMessage.includes('ENOTFOUND') || errorMessage.includes('getaddrinfo')) {
+                console.log(`   ⚠️ DNS error when downloading transcript: ${errorMessage}`);
+            } else {
+                console.log(`   ⚠️ Failed to download transcript from URL (status: ${status || 'N/A'}): ${errorMessage.substring(0, 200)}`);
             }
+            return null;
         }
-        return null;
-    }
-
-    /**
-     * Загружает транскрипт через Puppeteer (cookies и Origin совпадают с youtube.com).
-     * Это самый надежный способ получить транскрипт, так как запрос идет из контекста браузера YouTube.
-     */
-    private async downloadTranscriptViaPage(page: any, captionUrl: string): Promise<string | null> {
-        try {
-            const decodedUrl = this.decodeCaptionUrl(captionUrl);
-            // Пробуем разные форматы и параметры для получения транскрипта
-            const urlsToTry = [
-                decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=json3&lang=ru',
-                decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=json3',
-                decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'fmt=srv3&lang=ru',
-                decodedUrl + (decodedUrl.includes('?') ? '&' : '?') + 'lang=ru',
-                decodedUrl, // Оригинальный URL в конце
-            ];
-            for (const url of urlsToTry) {
-                // Используем .then() вместо async/await чтобы избежать ошибки __awaiter is not defined
-                const raw = await page.evaluate((u: string) => {
-                    return fetch(u, { credentials: 'include' })
-                        .then((r: Response) => {
-                            if (!r.ok) return '';
-                            return r.text();
-                        })
-                        .catch(() => '');
-                }, url);
-                if (typeof raw !== 'string' || !raw) continue;
-
-                // XML
-                if (raw.includes('<text')) {
-                    const items: string[] = [];
-                    for (const m of raw.matchAll(/<text[^>]*>([^<]+)<\/text>/g)) {
-                        const t = (m[1] || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
-                        if (t) items.push(t);
-                    }
-                    if (items.length > 0) {
-                        const text = items.join(' ');
-                        const normalized = this.normalizeTranscript(text);
-                        if (normalized) {
-                            console.log(`✓ Got transcript via Puppeteer (XML, ${normalized.length} chars) - FULL VIDEO TRANSCRIPT`);
-                            return normalized;
-                        }
-                    }
-                }
-
-                // json3
-                if (raw.includes('"events"') || raw.startsWith('{')) {
-                    try {
-                        const json = JSON.parse(raw);
-                        const events = json?.events || [];
-                        const items: string[] = [];
-                        for (const ev of events) {
-                            for (const seg of ev?.segs || []) {
-                                const utf8 = seg?.utf8;
-                                if (utf8 && typeof utf8 === 'string' && !utf8.match(/^[\s\u00a0]*$/)) {
-                                    items.push(utf8.replace(/\n/g, ' ').trim());
-                                }
-                            }
-                        }
-                        if (items.length > 0) {
-                            const text = items.join(' ').replace(/\s+/g, ' ').trim();
-                            const normalized = this.normalizeTranscript(text);
-                            if (normalized) {
-                                console.log(`✓ Got transcript via Puppeteer (json3, ${normalized.length} chars) - FULL VIDEO TRANSCRIPT`);
-                                return normalized;
-                            }
-                        }
-                    } catch { /* ignore */ }
-                }
-            }
-        } catch (e: any) {
-            console.log(`   Puppeteer fetch failed: ${e.message}`);
-        }
-        return null;
-    }
-
-    /**
-     * Извлекает первый caption URL из HTML
-     */
-    private extractCaptionUrlFromHtml(html: string): string | null {
-        const m = html.match(/"baseUrl"\s*:\s*"([^"]+timedtext[^"]+)"/);
-        if (m?.[1]) return this.decodeCaptionUrl(m[1]);
-        return null;
     }
 
     /**
@@ -1102,53 +1106,26 @@ class ContentService {
     
             const page = await browser.newPage();
             
-            // Устанавливаем viewport для более реалистичного вида (YouTube может блокировать headless без viewport)
-            await page.setViewport({ width: 1920, height: 1080 });
-            
             // Устанавливаем пользовательский агент и язык
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
             await page.setExtraHTTPHeaders({
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
     
-            // networkidle2 НЕ подходит для YouTube — там постоянные фоновые запросы, страница никогда не "замолкает"
-            // domcontentloaded — DOM готов, страница отрендерена, достаточно для транскрипта
             console.log(`Navigating to YouTube video: ${url}`);
             await page.goto(url, { 
-                waitUntil: 'domcontentloaded',
-                timeout: 60000
+                waitUntil: 'domcontentloaded', // Изменено с networkidle2 на domcontentloaded для быстрой загрузки
+                timeout: 90000 // Увеличено до 90 секунд
             });
-            // Дополнительно ждем загрузки основного контента (YouTube подгружает данные асинхронно)
+
+            // Ждем полной загрузки страницы
             await new Promise(resolve => setTimeout(resolve, 5000));
-            
-            // Прокручиваем страницу чтобы загрузить все элементы (YouTube lazy-load)
+
+            // Прокручиваем немного вниз чтобы загрузить все элементы
             await page.evaluate(() => {
-                window.scrollTo(0, 500);
+                window.scrollBy(0, 300);
             });
             await new Promise(resolve => setTimeout(resolve, 2000));
-
-            // Приоритет 0: caption URL + fetch в контексте страницы (cookies, Origin = youtube.com)
-            try {
-                const html = await page.content();
-                const captionUrl = this.extractCaptionUrlFromHtml(html);
-                if (captionUrl) {
-                    const transcriptViaPage = await this.downloadTranscriptViaPage(page, captionUrl);
-                    if (transcriptViaPage && transcriptViaPage.trim().length > 50) {
-                        console.log(`✓ Got transcript via Puppeteer page fetch (${transcriptViaPage.length} chars)`);
-                        return transcriptViaPage;
-                    }
-                }
-                // Fallback: стандартный парсинг (часто пустой при прямом axios)
-                const transcriptFromHtml = await this.extractTranscriptFromHTML(html, url);
-                if (transcriptFromHtml && transcriptFromHtml.trim().length > 50) {
-                    console.log(`✓ Got transcript from HTML (${transcriptFromHtml.length} chars)`);
-                    return transcriptFromHtml;
-                }
-            } catch (e: any) {
-                console.log(`   HTML/Puppeteer fetch failed: ${e.message}`);
-            }
-
-            // Дополнительное ожидание для загрузки UI элементов (уже прокрутили выше)
 
             // Стратегия 1: Прямой поиск кнопки "Расшифровка" или "Show transcript" в правой панели
             try {
@@ -1168,13 +1145,7 @@ class ContentService {
                         if (button) {
                             await button.click();
                             console.log(`✓ Clicked transcript button: ${selector}`);
-                            // Ждем появления панели транскрипта через waitForSelector вместо фиксированного таймаута
-                            try {
-                                await page.waitForSelector('ytd-transcript-segment-renderer, ytd-transcript-body-renderer, ytd-transcript-renderer', { timeout: 10000 });
-                            } catch {
-                                // Если селектор не появился, ждем немного и пробуем извлечь
-                                await new Promise(resolve => setTimeout(resolve, 3000));
-                            }
+                            await new Promise(resolve => setTimeout(resolve, 3000));
                             
                             const transcript = await this.extractTranscriptContent(page);
                             if (transcript) return transcript;
@@ -1214,12 +1185,7 @@ class ContentService {
 
                 if (transcriptText === 'clicked') {
                     console.log('✓ Clicked transcript button by text');
-                    // Ждем появления панели транскрипта через waitForSelector
-                    try {
-                        await page.waitForSelector('ytd-transcript-segment-renderer, ytd-transcript-body-renderer, ytd-transcript-renderer', { timeout: 10000 });
-                    } catch {
-                        await new Promise(resolve => setTimeout(resolve, 3000));
-                    }
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                     
                     const transcript = await this.extractTranscriptContent(page);
                     if (transcript) return transcript;
@@ -1246,7 +1212,7 @@ class ContentService {
                         await page.click(selector);
                         console.log(`✓ Clicked more actions button: ${selector}`);
                         moreActionsClicked = true;
-                        await new Promise(resolve => setTimeout(resolve, 4000)); // Меню должно успеть раскрыться
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                         break;
                     } catch (e) {
                         continue;
@@ -1269,12 +1235,7 @@ class ContentService {
 
                     if (transcriptFound) {
                         console.log('✓ Found and clicked transcript menu item');
-                        // Ждем появления панели транскрипта через waitForSelector
-                        try {
-                            await page.waitForSelector('ytd-transcript-segment-renderer, ytd-transcript-body-renderer, ytd-transcript-renderer', { timeout: 10000 });
-                        } catch {
-                            await new Promise(resolve => setTimeout(resolve, 3000));
-                        }
+                        await new Promise(resolve => setTimeout(resolve, 3000));
                         const transcript = await this.extractTranscriptContent(page);
                         if (transcript) return transcript;
                     }
@@ -1297,7 +1258,7 @@ class ContentService {
             }
 
             console.log('All transcript extraction strategies failed');
-            throw new Error('Transcript extraction timeout - все стратегии извлечения транскрипта не сработали');
+            return '';
 
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -1312,42 +1273,20 @@ class ContentService {
 
     private async extractTranscriptContent(page: any): Promise<string> {
         try {
-            // Ждем появления панели транскрипта (селекторы в порядке приоритета)
+            // Ждем появления панели транскрипта (увеличено время ожидания)
             const panelSelectors = [
-                'ytd-transcript-segment-renderer',      // Сегменты транскрипта
-                'ytd-transcript-body-renderer',         // Тело транскрипта
-                'ytd-transcript-renderer',              // Контейнер транскрипта
                 'ytd-engagement-panel-section-list-renderer',
                 '.ytd-transcript-body-renderer',
                 '#segments-container',
+                'ytd-transcript-segment-renderer',
                 '[role="document"]',
-                '#content-text'
+                '#content-text',
+                'ytd-transcript-renderer'
             ];
 
             for (const selector of panelSelectors) {
                 try {
-                    await page.waitForSelector(selector, { timeout: 20000 }); // Панель транскрипта может загружаться долго
-                    
-                    // Дополнительно ждем появления текста в панели (не только селектор, но и контент)
-                    try {
-                        await page.waitForFunction(
-                            (sel: string) => {
-                                const panel = document.querySelector(sel);
-                                if (!panel) return false;
-                                const textElements = panel.querySelectorAll('yt-formatted-string, .segment-text');
-                                let totalText = '';
-                                textElements.forEach((el: Element) => {
-                                    const text = el.textContent?.trim();
-                                    if (text && text.length > 10) totalText += text + ' ';
-                                });
-                                return totalText.length > 100; // Ждем пока появится достаточно текста
-                            },
-                            { timeout: 10000 },
-                            selector
-                        );
-                    } catch {
-                        // Если waitForFunction не сработал, продолжаем - возможно текст уже есть
-                    }
+                    await page.waitForSelector(selector, { timeout: 10000 }); // Увеличено с 5 до 10 секунд
                     
                     const transcriptText = await page.evaluate((sel: string) => {
                         const panel = document.querySelector(sel);
@@ -1376,16 +1315,11 @@ class ContentService {
                         return texts.join(' ').trim();
                     }, selector);
 
-                    const normalizedTranscript = this.normalizeTranscript(transcriptText);
-                    if (normalizedTranscript && normalizedTranscript.length >= 30) {
-                        console.log(`✓ Extracted transcript via selector "${selector}": ${normalizedTranscript.length} chars - FULL VIDEO TRANSCRIPT`);
-                        return normalizedTranscript;
-                    } else if (transcriptText) {
-                        console.log(`   ⚠️ Selector "${selector}" returned too short transcript: ${transcriptText.length} chars`);
+                    if (transcriptText && transcriptText.length > 50) {
+                        console.log(`✓ Extracted transcript: ${transcriptText.length} chars`);
+                        return transcriptText;
                     }
                 } catch (e) {
-                    // Продолжаем пробовать другие селекторы
-                    continue;
                     continue;
                 }
             }
@@ -1407,10 +1341,9 @@ class ContentService {
                     return texts.join(' ').trim();
                 });
                 
-                const normalizedAllText = this.normalizeTranscript(allText);
-                if (normalizedAllText && normalizedAllText.length >= 30) {
-                    console.log(`✓ Extracted transcript from segments: ${normalizedAllText.length} chars - FULL VIDEO TRANSCRIPT`);
-                    return normalizedAllText;
+                if (allText && allText.length > 50) {
+                    console.log(`✓ Extracted transcript from segments: ${allText.length} chars`);
+                    return allText;
                 }
             } catch (e) {
                 // Игнорируем ошибки
@@ -1430,18 +1363,12 @@ class ContentService {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
             
-            // Без cookies (cookiesFromBrowser вызывает DPAPI ошибку на Windows). mobile-клиент для обхода блокировки YouTube
-            const baseOpts: any = {
+            // Сначала получаем информацию о доступных субтитрах
+            const infoResult = await ytdlp(url, {
+                listSubs: true,
                 skipDownload: true,
                 quiet: true,
                 noWarnings: true,
-                extractorArgs: 'youtube:player_client=android', // mobile клиент меньше блокируется
-            };
-            
-            // Сначала получаем информацию о доступных субтитрах
-            const infoResult = await ytdlp(url, {
-                ...baseOpts,
-                listSubs: true,
             });
             
             // Пробуем скачать автоматически сгенерированные субтитры или обычные
@@ -1452,10 +1379,12 @@ class ContentService {
             try {
                 // Пробуем скачать автоматические субтитры (если доступны)
                 await ytdlp(url, {
-                    ...baseOpts,
                     writeAutoSub: true,
                     subLang: 'ru,en,uk', // Приоритет языков
+                    skipDownload: true,
                     output: tempSubsFile.replace('.vtt', ''),
+                    quiet: true,
+                    noWarnings: true,
                 });
                 
                 // Ищем скачанный файл субтитров
@@ -1486,20 +1415,21 @@ class ContentService {
                     // Удаляем временный файл
                     await fs.remove(subFile);
                     
-                    const normalizedSubContent = this.normalizeTranscript(subContent);
-                    if (normalizedSubContent && normalizedSubContent.length >= 30) {
-                        console.log(`✓ Extracted transcript via yt-dlp: ${normalizedSubContent.length} chars - FULL VIDEO TRANSCRIPT`);
-                        return normalizedSubContent;
+                    if (subContent && subContent.length > 50) {
+                        console.log(`✓ Extracted transcript via yt-dlp: ${subContent.length} chars`);
+                        return subContent;
                     }
                 }
             } catch (downloadError: any) {
                 // Если автоматические субтитры недоступны, пробуем обычные
                 try {
                     await ytdlp(url, {
-                        ...baseOpts,
                         writeSub: true,
                         subLang: 'ru,en,uk',
+                        skipDownload: true,
                         output: tempSubsFile.replace('.vtt', ''),
+                        quiet: true,
+                        noWarnings: true,
                     });
                     
                     const glob = await import('glob');
@@ -1524,10 +1454,9 @@ class ContentService {
                         
                         await fs.remove(subFile);
                         
-                        const normalizedSubContent = this.normalizeTranscript(subContent);
-                        if (normalizedSubContent && normalizedSubContent.length >= 30) {
-                            console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${normalizedSubContent.length} chars - FULL VIDEO TRANSCRIPT`);
-                            return normalizedSubContent;
+                        if (subContent && subContent.length > 50) {
+                            console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${subContent.length} chars`);
+                            return subContent;
                         }
                     }
                 } catch (manualSubError: any) {
@@ -1550,14 +1479,13 @@ class ContentService {
         try {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
-            const opts: any = {
+            const rawResult = await ytdlp(url, {
                 dumpSingleJson: true,
                 noWarnings: true,
                 simulate: true,
                 skipDownload: true,
                 quiet: true,
-            };
-            const rawResult = await ytdlp(url, opts);
+            });
 
             const parsed = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
             const title = parsed?.title || parsed?.fulltitle;
@@ -2355,6 +2283,7 @@ class ContentService {
             const ytdlp = (await import('yt-dlp-exec')).default;
             const normalizedOutput = outputPath.endsWith('.mp4') ? outputPath : `${outputPath}.mp4`;
 
+            // Специальные опции для VK и других платформ, которые могут требовать авторизацию
             const options: any = {
                 output: normalizedOutput,
                 format: 'bestvideo*+bestaudio/best',
@@ -2364,11 +2293,14 @@ class ContentService {
                 noWarnings: true,
             };
 
-            if (url.includes('youtube.com') || url.includes('youtu.be')) {
-                options.extractorArgs = 'youtube:player_client=android,web';
-            } else if (url.includes('vk.com') || url.includes('vkvideo.ru') || url.includes('vkontakte.ru')) {
-                options.extractorArgs = { vk: ['--no-check-certificate'] };
+            // Для VK добавляем дополнительные опции
+            if (url.includes('vk.com') || url.includes('vkvideo.ru') || url.includes('vkontakte.ru')) {
+                // Пробуем скачать без авторизации, если не получится - будет ошибка
+                options.extractorArgs = {
+                    vk: ['--no-check-certificate']
+                };
             }
+
             await ytdlp(url, options);
 
             // Проверяем, что файл действительно скачался
@@ -2441,46 +2373,33 @@ class ContentService {
      */
     private async transcribeAudio(audioPath: string): Promise<string> {
         // Приоритет: OpenAI Whisper API (если доступен), затем локальный Whisper
-        const openaiTimeout = parseInt(process.env.OPENAI_WHISPER_TIMEOUT_MS || '25000', 10); // 25 сек — быстро падать при Connection error
         if (process.env.OPENAI_API_KEY) {
             try {
                 console.log('Using OpenAI Whisper API for transcription...');
                 const OpenAI = (await import('openai')).default;
                 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
                 const fileStream = fs.createReadStream(audioPath);
-                const transcription = await Promise.race([
-                    openai.audio.transcriptions.create({
-                        file: fileStream as any,
-                        model: 'whisper-1',
-                        language: 'ru',
-                    }),
-                    new Promise<never>((_, rej) => setTimeout(() => rej(new Error('OpenAI Whisper timeout')), openaiTimeout)),
-                ]);
-                const text = transcription.text;
-                const audioBuf = await fs.readFile(audioPath);
-                // @ts-ignore - wav-decoder types
-                const wavDecoder = await import('wav-decoder');
-                const decoded = await wavDecoder.decode(audioBuf.buffer.slice(audioBuf.byteOffset, audioBuf.byteOffset + audioBuf.byteLength));
-                const durMin = (decoded.channelData?.[0]?.length || 0) / (decoded.sampleRate || 16000) / 60;
-                const approxMin = (text?.length || 0) / 900;
-                const full = approxMin >= durMin * 0.8;
-                console.log(`📊 Видео: ${durMin.toFixed(1)} мин | Транскрипт: ${(text?.length || 0)} симв. (~${approxMin.toFixed(1)} мин речи) | ${full ? '✅ Полностью' : '⚠️ Частично'}`);
-                return text;
+                const transcription = await openai.audio.transcriptions.create({
+                    file: fileStream as any,
+                    model: 'whisper-1',
+                    language: 'ru',
+                });
+                return transcription.text;
             } catch (error: any) {
                 console.warn(`OpenAI Whisper API failed: ${error.message}, falling back to local Whisper...`);
             }
         }
 
         // Fallback: локальный Whisper через @xenova/transformers
-        // Используем whisper-small по умолчанию (whisper-medium может не поддерживаться в некоторых версиях библиотеки)
         try {
-            const modelId = process.env.WHISPER_MODEL || 'Xenova/whisper-small'; // small работает стабильно
-            console.log(`Using local Whisper model (${modelId}) for transcription (this may take a while)...`);
+            console.log('Using local Whisper model for transcription (this may take a while)...');
             // @ts-ignore - @xenova/transformers types may not be available
             const { pipeline } = await import('@xenova/transformers');
             // @ts-ignore - wav-decoder types may not be available
             const wavDecoder = await import('wav-decoder');
 
+            // Загружаем wav-файл и преобразуем в Float32Array,
+            // поскольку в Node.js нет AudioContext
             const audioBuffer = await fs.readFile(audioPath);
             const arrayBuffer = audioBuffer.buffer.slice(
                 audioBuffer.byteOffset,
@@ -2488,7 +2407,6 @@ class ContentService {
             );
             const decodedWav = await wavDecoder.decode(arrayBuffer);
             const channelData = decodedWav.channelData?.[0];
-            const sampleRate = decodedWav.sampleRate || 16000;
 
             if (!channelData) {
                 throw new Error('Decoded audio has no channel data');
@@ -2496,43 +2414,19 @@ class ContentService {
 
             const transcriber = await pipeline(
                 'automatic-speech-recognition',
-                modelId,
+                'Xenova/whisper-small',
                 // @ts-ignore - device option is supported at runtime
                 { device: 'cpu' }
             );
 
-            // Ручная обработка по чанкам — гарантирует полный транскрипт всего видео
-            const CHUNK_SEC = 30;
-            const STRIDE_SEC = 5;
-            const samplesPerChunk = Math.floor(sampleRate * CHUNK_SEC);
-            const totalSamples = channelData.length;
-            const chunks: Float32Array[] = [];
-            for (let start = 0; start < totalSamples; start += samplesPerChunk - Math.floor(sampleRate * STRIDE_SEC)) {
-                const end = Math.min(start + samplesPerChunk, totalSamples);
-                chunks.push(channelData.slice(start, end));
-                if (end >= totalSamples) break;
-            }
+            const result = await transcriber(channelData, {
+                language: 'russian',
+                task: 'transcribe',
+                // @ts-ignore - sampling_rate is supported at runtime
+                sampling_rate: decodedWav.sampleRate,
+            } as any);
 
-            const parts: string[] = [];
-            for (let i = 0; i < chunks.length; i++) {
-                const chunk = chunks[i];
-                const result = await transcriber(chunk, {
-                    language: 'russian',
-                    task: 'transcribe',
-                    // @ts-ignore
-                    sampling_rate: sampleRate,
-                } as any);
-                const text = (result as any).text?.trim();
-                if (text) parts.push(text);
-                if (chunks.length > 1) console.log(`   Chunk ${i + 1}/${chunks.length} done`);
-            }
-
-            const transcriptText = parts.join(' ').trim();
-            const audioDurationMin = totalSamples / sampleRate / 60;
-            const approxSpeechMin = transcriptText.length / 900;
-            const isFull = approxSpeechMin >= audioDurationMin * 0.8;
-            console.log(`📊 Видео: ${audioDurationMin.toFixed(1)} мин | Транскрипт: ${transcriptText.length} симв. (~${approxSpeechMin.toFixed(1)} мин речи) | ${isFull ? '✅ Полностью' : '⚠️ Частично'}`);
-            return transcriptText;
+            return (result as any).text || '';
         } catch (error: any) {
             throw new Error(`Transcription failed: ${error.message}`);
         }
