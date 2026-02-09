@@ -1379,14 +1379,20 @@ class ContentService {
             const cookiesOpts = this.getYtDlpCookiesOptions();
             const hasCookies = Object.keys(cookiesOpts).length > 0;
             
-            // Сначала получаем информацию о доступных субтитрах
-            const infoResult = await ytdlp(url, {
+            // player_client=web_embedded иногда работает без cookies (обход bot detection)
+            const extractorArgs = 'youtube:player_client=web_embedded,web,android';
+            
+            const baseOpts = {
                 ...cookiesOpts,
+                extractorArgs,
                 listSubs: true,
                 skipDownload: true,
                 quiet: true,
                 noWarnings: true,
-            });
+            };
+            
+            // Сначала получаем информацию о доступных субтитрах
+            const infoResult = await ytdlp(url, baseOpts);
             
             // Пробуем скачать автоматически сгенерированные субтитры или обычные
             // Используем временный файл для субтитров
@@ -1397,6 +1403,7 @@ class ContentService {
                 // Пробуем скачать автоматические субтитры (если доступны)
                 await ytdlp(url, {
                     ...cookiesOpts,
+                    extractorArgs,
                     writeAutoSub: true,
                     subLang: 'ru,en,uk', // Приоритет языков
                     skipDownload: true,
@@ -1443,6 +1450,7 @@ class ContentService {
                 try {
                     await ytdlp(url, {
                         ...cookiesOpts,
+                        extractorArgs,
                         writeSub: true,
                         subLang: 'ru,en,uk',
                         skipDownload: true,
@@ -1561,6 +1569,7 @@ class ContentService {
             const ytdlp = (await import('yt-dlp-exec')).default;
             const rawResult = await ytdlp(url, {
                 ...this.getYtDlpCookiesOptions(),
+                extractorArgs: 'youtube:player_client=web_embedded,web,android',
                 dumpSingleJson: true,
                 noWarnings: true,
                 simulate: true,
