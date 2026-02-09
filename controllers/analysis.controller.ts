@@ -12,8 +12,12 @@ import ContentRelevanceScore from '../models/ContentRelevanceScore';
 import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
+import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 
 const MAX_URLS_LIMIT = 25;
+
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const IS_DEBUG = LOG_LEVEL === 'debug';
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -80,18 +84,24 @@ const processTextAnalysis = async (
             throw new Error('Текст слишком короткий для анализа. Минимум 20 символов.');
         }
 
-        const analysisResult = await analyzeContentWithAI(text, interests, feedbackHistory, undefined, userId);
+        const analysisResult = await analyzeContentWithAI(text, interests, feedbackHistory, undefined, userId, 'article');
         
         // Обработка семантических тегов в зависимости от режима
         let semanticComparisonResult = null;
+        let extractedThemes: string[] = [];
         
         if (userId) {
             try {
-                console.log(`🎯 [Semantic Tags] Extracting themes from text for user ${userId} (mode: ${mode})...`);
+                if (IS_DEBUG) {
+                    console.log(`🎯 [Semantic Tags] Extracting themes from text for user ${userId} (mode: ${mode})...`);
+                }
                 const themes = await extractThemes(text);
                 
                 if (themes.length > 0) {
-                    console.log(`📌 Extracted ${themes.length} themes:`, themes);
+                    if (IS_DEBUG) {
+                        console.log(`📌 Extracted ${themes.length} themes:`, themes);
+                    }
+                    extractedThemes = themes; // Сохраняем для возврата в результате
                     
                     if (mode === 'read') {
                         // Режим 'read': сохраняем теги в "облако смыслов" пользователя
@@ -103,7 +113,7 @@ const processTextAnalysis = async (
                         // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
-                        semanticComparisonResult = compareThemes(themes, userTagsWithWeights);
+                        semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
                         console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
                         
                         if (semanticComparisonResult.hasNoTags) {
@@ -111,7 +121,7 @@ const processTextAnalysis = async (
                             // Добавляем стандартное сообщение для случая без тегов
                             semanticComparisonResult = {
                                 ...semanticComparisonResult,
-                                semanticVerdict: 'У вас пока нет тегов в "облаке смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
+                                semanticVerdict: 'У вас пока нет тегов в "облако смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
                             };
                         } else {
                             // Генерируем AI-рекомендацию на основе сравнения тегов
@@ -263,8 +273,9 @@ const processTextAnalysis = async (
             sourceType: 'text',
             ...analysisResult,
             relevanceLevel: relevanceLevelResult,
-            analysisHistoryId,
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
+            extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
+            analysisHistoryId,
             error: false
         };
     } catch (error: any) {
@@ -296,7 +307,31 @@ export const processSingleUrlAnalysis = async (
     let fullContentForEmbedding: string | null = null;
     
     try {
+        // Проверяем, является ли это ссылкой на Telegram канал (без ID сообщения)
+        const telegramChannelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)$/);
+        if (telegramChannelMatch) {
+            const channelUsername = telegramChannelMatch[1];
+            // Возвращаем специальный результат для канала, который будет обработан на фронтенде
+            return {
+                originalUrl: url,
+                url: url,
+                sourceType: 'telegram_channel',
+                error: false,
+                isChannel: true,
+                channelUsername: channelUsername,
+                message: `Обнаружен Telegram-канал @${channelUsername}. Для анализа канала используйте специальный API.`
+            } as any;
+        }
+
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
+        
+        // Логируем тип источника для диагностики
+        if (sourceType === 'transcript') {
+            console.log(`✅ Using FULL VIDEO TRANSCRIPT for analysis (${content.length} chars)`);
+        } else if (sourceType === 'metadata') {
+            console.log(`⚠️ Using METADATA ONLY for analysis (${content.length} chars) - NOT full video content`);
+        }
+        
         // Сохраняем весь контент для эмбеддинга (максимум 50000 символов для очень длинных статей)
         // Используем весь текст для максимально точных эмбеддингов
         const MAX_CONTENT_FOR_EMBEDDING = 50000;
@@ -353,18 +388,24 @@ export const processSingleUrlAnalysis = async (
             }
         }
 
-        const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId);
+        const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType);
         
         // Обработка семантических тегов в зависимости от режима
         let semanticComparisonResult = null;
+        let extractedThemes: string[] = [];
         
         if (userId) {
             try {
-                console.log(`🎯 [Semantic Tags] Extracting themes from content for user ${userId} (mode: ${mode})...`);
+                if (IS_DEBUG) {
+                    console.log(`🎯 [Semantic Tags] Extracting themes from content for user ${userId} (mode: ${mode})...`);
+                }
                 const themes = await extractThemes(content);
                 
                 if (themes.length > 0) {
-                    console.log(`📌 Extracted ${themes.length} themes:`, themes);
+                    if (IS_DEBUG) {
+                        console.log(`📌 Extracted ${themes.length} themes:`, themes);
+                    }
+                    extractedThemes = themes; // Сохраняем для возврата в результате
                     
                     if (mode === 'read') {
                         // Режим 'read': сохраняем теги в "облако смыслов" пользователя
@@ -376,7 +417,7 @@ export const processSingleUrlAnalysis = async (
                         // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
-                        semanticComparisonResult = compareThemes(themes, userTagsWithWeights);
+                        semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
                         console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
                         
                         if (semanticComparisonResult.hasNoTags) {
@@ -384,18 +425,18 @@ export const processSingleUrlAnalysis = async (
                             // Добавляем стандартное сообщение для случая без тегов
                             semanticComparisonResult = {
                                 ...semanticComparisonResult,
-                                semanticVerdict: 'У вас пока нет тегов в "облаке смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
+                                semanticVerdict: 'У вас пока нет тегов в "облако смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
                             };
-                                } else {
-                                    // Генерируем AI-рекомендацию на основе сравнения тегов
-                                    try {
-                                        const semanticVerdict = await generateSemanticRecommendation(
-                                            themes,
-                                            userTagsWithWeights,
-                                            semanticComparisonResult,
-                                            fullContentForEmbedding || content, // Передаем контент статьи для RAG
-                                            userId // Передаем userId для RAG
-                                        );
+                        } else {
+                            // Генерируем AI-рекомендацию на основе сравнения тегов
+                            try {
+                                const semanticVerdict = await generateSemanticRecommendation(
+                                    themes,
+                                    userTagsWithWeights,
+                                    semanticComparisonResult,
+                                    fullContentForEmbedding || content, // Передаем контент статьи для RAG
+                                    userId // Передаем userId для RAG
+                                );
                                 // Добавляем рекомендацию в результат сравнения
                                 semanticComparisonResult = {
                                     ...semanticComparisonResult,
@@ -434,9 +475,10 @@ export const processSingleUrlAnalysis = async (
         let relevanceLevelResult = null;
         if (userId) {
             try {
-                console.log(`📊 [Relevance Level] Starting automatic relevance level analysis for user ${userId}...`);
+                if (IS_DEBUG) {
+                    console.log(`📊 [Relevance Level] Starting automatic relevance level analysis for user ${userId}...`);
+                }
                 const interestsList = interests.split(',').map((i: string) => i.trim().toLowerCase());
-                console.log(`📊 [Relevance Level] Checking user levels for interests: ${interestsList.join(', ')}`);
                 
                 const userLevelsRecords = await UserInterestLevel.findAll({
                     where: {
@@ -449,8 +491,6 @@ export const processSingleUrlAnalysis = async (
                     interest: ul.interest,
                     level: ul.level,
                 }));
-
-                console.log(`📊 [Relevance Level] Found ${userLevels.length} user level(s):`, userLevels);
 
                 if (userLevels.length > 0) {
                     console.log(`📊 [Relevance Level] Analyzing content level and user match for ${userLevels.length} interest(s)...`);
@@ -467,9 +507,6 @@ export const processSingleUrlAnalysis = async (
                     if (interestsWithLevels.length > 0) {
                         try {
                             const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
-                            console.log(`🚀 Using optimized analysis: ${interestsWithLevels.length} interests in ONE API request`);
-                            
-                            // Устанавливаем таймаут для анализа уровня релевантности (максимум 30 секунд)
                             const relevanceResults = await Promise.race([
                                 analyzeRelevanceLevelForMultipleInterests(content, interestsWithLevels),
                                 new Promise<never>((_, reject) => 
@@ -599,13 +636,14 @@ export const processSingleUrlAnalysis = async (
                 console.warn(`⚠️ Failed to save URL analysis to history: ${error.message}`);
             }
         }
-        
+
         return {
             originalUrl: url,
             sourceType,
             ...analysisResult,
             relevanceLevel: relevanceLevelResult,
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
+            extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
             analysisHistoryId, // Добавляем ID записи в истории
             error: false
         };
@@ -624,17 +662,28 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
     try {
         const { urls: urlInput, interests, mode } = req.body;
         const userId = (req as AuthenticatedRequest).user?.userId;
+
+        const enableOnDemandChannelMonitoring = process.env.ENABLE_TELEGRAM_CHANNEL_MONITORING_ON_ANALYSIS === 'true';
+        if (enableOnDemandChannelMonitoring && userId) {
+            setImmediate(() => {
+                checkUserChannelsNow(userId).catch((error: any) => {
+                    console.error(`❌ [telegram-channel-monitor] On-demand (analysis trigger) failed for user ${userId}:`, error.message);
+                });
+            });
+        }
         
         // Валидация и установка режима по умолчанию
         const analysisMode: 'read' | 'unread' = (mode === 'unread' ? 'unread' : 'read');
 
-        console.log('🎯 ANALYSIS REQUEST DETAILS:', {
-            receivedInterests: interests,
-            receivedUrls: urlInput,
-            userId: userId,
-            mode: analysisMode,
-            body: req.body
-        });
+        if (IS_DEBUG) {
+            console.log('🎯 ANALYSIS REQUEST DETAILS:', {
+                receivedInterests: interests,
+                receivedUrls: urlInput,
+                userId: userId,
+                mode: analysisMode,
+                body: req.body
+            });
+        }
 
         if (!urlInput || !interests) {
             return res.status(400).json({ message: 'URLs/text and interests are required.' });
@@ -669,7 +718,9 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
                 if (isValidUrl(line)) {
                     urls.push(line);
                     foundValidUrls++;
-                    console.log(`📊 Detected URL: ${line.substring(0, 50)}...`);
+                    if (IS_DEBUG) {
+                        console.log(`📊 Detected URL: ${line.substring(0, 50)}...`);
+                    }
                 } else if (line.length > 0) {
                     // Не пустая строка, но не URL - добавляем в тексты
                     nonUrlParts.push(line);
@@ -702,11 +753,17 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             let feedbackHistory: UserFeedbackHistory[] = [];
             if (userId) {
                 feedbackHistory = await UserService.getUserFeedbackHistory(userId);
+                if (IS_DEBUG) {
+                    console.log('📋 Loaded feedback history length:', feedbackHistory.length);
+                }
             }
             
             for (let i = 0; i < texts.length; i++) {
                 const text = texts[i];
-                console.log(`📝 [${i + 1}/${texts.length}] Analyzing text (${text.length} chars) with interests: ${interests}, mode: ${analysisMode}`);
+                console.log(`📝 [${i + 1}/${texts.length}] Analyzing text (${text.length} chars) (mode: ${analysisMode})`);
+                if (IS_DEBUG) {
+                    console.log(`   Interests: ${interests}`);
+                }
                 const result = await processTextAnalysis(text, interests, feedbackHistory, userId, analysisMode);
                 textResults.push(result);
             }
@@ -788,12 +845,16 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
         
         // ВАЖНО: Используем ТОЛЬКО переданные интересы, без смешивания
         const finalInterests = interests;
-        console.log('🎯 FINAL INTERESTS FOR ANALYSIS:', finalInterests);
+        if (IS_DEBUG) {
+            console.log('🎯 FINAL INTERESTS FOR ANALYSIS:', finalInterests);
+        }
 
         let feedbackHistory: UserFeedbackHistory[] = [];
         if (userId) {
             feedbackHistory = await UserService.getUserFeedbackHistory(userId);
-            console.log('📋 Loaded feedback history length:', feedbackHistory.length);
+            if (IS_DEBUG) {
+                console.log('📋 Loaded feedback history length:', feedbackHistory.length);
+            }
         }
 
         const urlResults: any[] = [];
@@ -806,7 +867,10 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             
             for (let i = 0; i < uniqueUrls.length; i++) {
                 const url = uniqueUrls[i];
-                console.log(`🔍 [${i + 1}/${uniqueUrls.length}] Analyzing URL: ${url} with interests: ${finalInterests}, mode: ${analysisMode}`);
+                console.log(`🔍 [${i + 1}/${uniqueUrls.length}] Analyzing URL: ${url} (mode: ${analysisMode})`);
+                if (IS_DEBUG) {
+                    console.log(`   Interests: ${finalInterests}`);
+                }
                 const result = await processSingleUrlAnalysis(url, finalInterests, feedbackHistory, userId, analysisMode);
                 urlResults.push(result);
                 

@@ -29,7 +29,8 @@ export const authMiddleware = (req: AuthenticatedRequest, res: Response, next: N
     try {
         const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
         req.user = decoded;
-        console.log(`✓ Token verified for user ${decoded.userId}`);
+        // Убираем избыточное логирование - проверка токена происходит при каждом запросе
+        // console.log(`✓ Token verified for user ${decoded.userId}`);
         next();
     } catch (error: any) {
         console.error('❌ Token verification failed:', error.message);

@@ -11,6 +11,9 @@ if (!apiKey) {
 // Или передать через опции (проверяем оба варианта)
 const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
 
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const IS_DEBUG = LOG_LEVEL === 'debug';
+
 // Очередь запросов для предотвращения rate limiting
 // Ограничиваем количество одновременных запросов к Gemini API
 class RequestQueue {
@@ -85,8 +88,7 @@ export interface AnalysisResult {
     reasoning: string;
 }
 
-
-const MAX_CONTENT_LENGTH = 500000; 
+const MAX_CONTENT_LENGTH = 500000; // Максимальная длина контента для анализа
 
 async function generateCompletionWithRetry(
     modelName: string,
@@ -308,7 +310,8 @@ export const analyzeContent = async (
     interests: string,
     feedbackHistory: UserFeedbackHistory[] = [],
     currentUrl?: string,
-    userId?: number // Добавляем userId для RAG
+    userId?: number, // Добавляем userId для RAG
+    sourceType?: 'transcript' | 'metadata' | 'article' | 'telegram' // Тип источника контента
 ): Promise<AnalysisResult> => {
     let processedContent = content;
     if (content.length > MAX_CONTENT_LENGTH) {
@@ -318,12 +321,21 @@ export const analyzeContent = async (
         console.log(`✓ Analyzing full content: ${content.length} chars (full analysis)`);
     }
     
+    // Определяем тип контента для промпта
+    const contentTypeNote = sourceType === 'transcript' 
+        ? 'ВАЖНО: Ты анализируешь ПОЛНЫЙ ТРАНСКРИПТ ВИДЕО - это полная расшифровка всего сказанного в видео. Это НЕ метаданные (название/описание), а весь текст из видео. Анализируй весь транскрипт полностью.'
+        : sourceType === 'metadata'
+        ? 'ВАЖНО: Ты анализируешь ТОЛЬКО МЕТАДАННЫЕ (название и описание видео). Полный транскрипт видео недоступен. Это означает, что у тебя есть только ограниченная информация о содержании видео. ОБЯЗАТЕЛЬНО укажи это в reasoning.'
+        : '';
+
     const systemInstruction = `Ты — интеллектуальный куратор контента. Твоя задача — анализировать ВЕСЬ предоставленный текст полностью на основе ВЫБРАННЫХ интересов пользователя и предоставлять структурированный JSON-ответ.
 
 ОЧЕНЬ ВАЖНО: 
 - Весь твой ответ должен быть ТОЛЬКО валидным JSON-объектом БЕЗ markdown разметки (без \`\`\`json и \`\`\`).
 - Все значения JSON (summary, reasoning, verdict) ДОЛЖНЫ быть на русском языке.
 - Все кавычки и специальные символы в строках ДОЛЖНЫ быть правильно экранированы для валидного JSON.
+
+${contentTypeNote}
 
 **КРИТИЧЕСКИ ВАЖНО:**
 - Анализируй ВЕСЬ контент полностью, не пропуская детали. Это может быть длинное видео или статья - проанализируй всё содержимое.
@@ -552,37 +564,42 @@ ${feedbackContext}${ragContext}
 
     try {
         console.log(`🤖 Using AI model: ${aiModel} (Google Gemini - FREE)`);
-        console.log(`📊 Content length: ${processedContent.length} chars (${Math.round(processedContent.length / 4)} estimated tokens)`);
-        console.log(`📋 Selected interests: ${interests}`);
+        if (IS_DEBUG) {
+            console.log(`📊 Content length: ${processedContent.length} chars (${Math.round(processedContent.length / 4)} estimated tokens)`);
+            console.log(`📋 Selected interests: ${interests}`);
+        }
         if (relevantFeedback.length > 0) {
             const negativeCount = relevantFeedback.filter(fb => !fb.aiAssessmentWasCorrect).length;
             const positiveCount = relevantFeedback.filter(fb => fb.aiAssessmentWasCorrect).length;
             const exactUrlMatch = relevantFeedback.find(fb => fb.isExactUrlMatch);
             const interestsChanged = exactUrlMatch && exactUrlMatch.interestsMatchResult.matchRatio < 0.7;
             
-            console.log(`💡 Using ${relevantFeedback.length} feedback entries for selected interests:`);
-            console.log(`   - ❌ Negative feedback: ${negativeCount} (will lower scores)`);
-            console.log(`   - ✅ Positive feedback: ${positiveCount}`);
-            if (exactUrlMatch) {
-                console.log(`   ⚠️ EXACT URL MATCH FOUND!`);
-                console.log(`      - User previously analyzed this URL and said it was ${exactUrlMatch.aiAssessmentWasCorrect ? 'interesting' : 'NOT interesting'}`);
-                console.log(`      - Interests match ratio: ${Math.round(exactUrlMatch.interestsMatchResult.matchRatio * 100)}%`);
-                if (interestsChanged) {
-                    console.log(`      - ⚠️ INTERESTS CHANGED! Will re-analyze based on current interests`);
-                } else {
-                    console.log(`      - ✅ Interests match, will use feedback strongly`);
+            if (IS_DEBUG) {
+                console.log(`💡 Using ${relevantFeedback.length} feedback entries for selected interests:`);
+                console.log(`   - ❌ Negative feedback: ${negativeCount} (will lower scores)`);
+                console.log(`   - ✅ Positive feedback: ${positiveCount}`);
+                if (exactUrlMatch) {
+                    console.log(`   - 🎯 Exact URL match found: ${exactUrlMatch.url.substring(0, 50)}...`);
+                    if (interestsChanged) {
+                        console.log(`   - ⚠️ Interests changed significantly since last analysis (${Math.round(exactUrlMatch.interestsMatchResult.matchRatio * 100)}% match)`);
+                    }
                 }
+                
+                relevantFeedback.forEach((fb, idx) => {
+                    const interestsMatchInfo = fb.interestsMatchResult.match ? '✅ interests match' : '⚠️ partial match';
+                    console.log(`   ${idx + 1}. URL: ${fb.url.substring(0, 50)}... ${fb.isExactUrlMatch ? '⚠️ EXACT MATCH' : ''} | ${interestsMatchInfo} (${Math.round(fb.interestsMatchResult.matchRatio * 100)}%) | Was correct: ${fb.aiAssessmentWasCorrect} | Comment: ${fb.userComment || 'none'}`);
+                });
             }
-            relevantFeedback.forEach((fb, idx) => {
-                const interestsMatchInfo = fb.interestsMatchResult.matchRatio < 0.7 ? '⚠️ INTERESTS CHANGED' : '✅ INTERESTS MATCH';
-                console.log(`   ${idx + 1}. URL: ${fb.url.substring(0, 50)}... ${fb.isExactUrlMatch ? '⚠️ EXACT MATCH' : ''} | ${interestsMatchInfo} (${Math.round(fb.interestsMatchResult.matchRatio * 100)}%) | Was correct: ${fb.aiAssessmentWasCorrect} | Comment: ${fb.userComment || 'none'}`);
-            });
         } else if (feedbackHistory.length > 0) {
-            console.log(`ℹ️ Feedback history available (${feedbackHistory.length} entries), but none match selected interests`);
-            console.log(`   Selected interests: ${selectedInterestsList.join(', ')}`);
-            console.log(`   Feedback interests samples: ${feedbackHistory.slice(0, 3).map(fb => fb.userInterests).join(' | ')}`);
+            if (IS_DEBUG) {
+                console.log(`ℹ️ Feedback history available (${feedbackHistory.length} entries), but none match selected interests`);
+                console.log(`   Selected interests: ${selectedInterestsList.join(', ')}`);
+                console.log(`   Feedback interests samples: ${feedbackHistory.slice(0, 3).map(fb => fb.userInterests).join(' | ')}`);
+            }
         } else {
-            console.log(`ℹ️ No feedback history available`);
+            if (IS_DEBUG) {
+                console.log(`ℹ️ No feedback history available`);
+            }
         }
         
         // Gemini 1.5 поддерживает до 1M токенов контекста - достаточно для любого контента
@@ -590,7 +607,9 @@ ${feedbackContext}${ragContext}
             console.warn(`⚠️ WARNING: Content is very long (${processedContent.length} chars). Gemini 1.5 supports up to 1M tokens.`);
         }
         
-        console.log('Sending request to Gemini API...');
+        if (IS_DEBUG) {
+            console.log('Sending request to Gemini API...');
+        }
         
         // Список моделей для fallback при ошибке 503 (модель перегружена) или 404 (модель не найдена)
         // gemini-pro не поддерживается в API v1beta, поэтому используем только gemini-2.5-flash
@@ -607,7 +626,9 @@ ${feedbackContext}${ragContext}
         
         for (const modelToTry of modelsToTry) {
             try {
-                console.log(`🤖 Trying model: ${modelToTry}`);
+                if (IS_DEBUG) {
+                    console.log(`🤖 Trying model: ${modelToTry}`);
+                }
                 result = await generateCompletionWithRetry(modelToTry, systemInstruction, jsonPrompt);
                 if (modelToTry !== aiModel) {
                     console.log(`✓ Fallback to ${modelToTry} succeeded`);
@@ -689,7 +710,9 @@ ${feedbackContext}${ragContext}
         }
         
         // Логируем структуру ответа для диагностики
-        console.log('Gemini API response structure:', JSON.stringify(Object.keys(result || {}), null, 2));
+        if (process.env.LOG_LEVEL === 'debug') {
+            console.log('Gemini API response structure:', JSON.stringify(Object.keys(result || {}), null, 2));
+        }
         
         // Новый SDK может возвращать ответ в разных форматах
         let rawResponse: string;
@@ -710,10 +733,12 @@ ${feedbackContext}${ragContext}
             throw new Error('AI response is empty.');
         }
 
-        console.log('Raw AI response length:', rawResponse.length);
-        console.log('Raw AI response (first 500 chars):', rawResponse.substring(0, 500));
-        if (rawResponse.length > 500) {
-            console.log('Raw AI response (last 200 chars):', rawResponse.substring(rawResponse.length - 200));
+        if (process.env.LOG_LEVEL === 'debug') {
+            console.log('Raw AI response length:', rawResponse.length);
+            console.log('Raw AI response (first 500 chars):', rawResponse.substring(0, 500));
+            if (rawResponse.length > 500) {
+                console.log('Raw AI response (last 200 chars):', rawResponse.substring(rawResponse.length - 200));
+            }
         }
         
         // Очистка от markdown разметки (```json ... ```)
@@ -747,8 +772,10 @@ ${feedbackContext}${ragContext}
         // Дополнительная очистка: удаляем все символы перед первым { и после последнего }
         cleanedResponse = cleanedResponse.trim();
         
-        console.log('Cleaned response (first 300 chars):', cleanedResponse.substring(0, 300) + '...');
-        console.log('Cleaned response length:', cleanedResponse.length);
+        if (process.env.LOG_LEVEL === 'debug') {
+            console.log('Cleaned response (first 300 chars):', cleanedResponse.substring(0, 300) + '...');
+            console.log('Cleaned response length:', cleanedResponse.length);
+        }
         
         let parsedResponse: AnalysisResult;
         try {
@@ -833,9 +860,11 @@ ${feedbackContext}${ragContext}
             console.warn('Summary seems too short:', parsedResponse.summary);
         }
         
-        console.log('Successfully parsed AI JSON response.');
-        console.log('Summary length:', parsedResponse.summary.length);
-        console.log('Reasoning length:', parsedResponse.reasoning.length);
+        if (process.env.LOG_LEVEL === 'debug') {
+            console.log('Successfully parsed AI JSON response.');
+            console.log('Summary length:', parsedResponse.summary.length);
+            console.log('Reasoning length:', parsedResponse.reasoning.length);
+        }
         
         return parsedResponse;
         

@@ -248,5 +248,109 @@ class UserController {
             return res.status(500).json({ message: 'Server error', error });
         }
     }
+
+    /**
+     * Удаляет семантический тег пользователя
+     * DELETE /api/profile/tags/:tagId
+     */
+    async deleteSemanticTag(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
+        try {
+            const userId = req.user?.userId;
+            if (!userId) {
+                return res.status(401).json({ message: 'Unauthorized' });
+            }
+
+            const tagId = parseInt(req.params.tagId, 10);
+            if (isNaN(tagId)) {
+                return res.status(400).json({ message: 'Invalid tag ID' });
+            }
+
+            const deleted = await UserService.deleteSemanticTag(userId, tagId);
+            
+            if (!deleted) {
+                return res.status(404).json({ message: 'Tag not found' });
+            }
+
+            return res.status(200).json({ 
+                message: 'Tag deleted successfully',
+                deleted: true 
+            });
+        } catch (error) {
+            return res.status(500).json({ message: 'Server error', error });
+        }
+    }
+
+    /**
+     * Сохраняет комментарий к анализу и извлекает дополнительные теги из комментария
+     * POST /api/analysis/:historyId/comment
+     * Body: { comment: string }
+     */
+    async saveAnalysisComment(req: AuthenticatedRequest, res: Response): Promise<Response | void> {
+        try {
+            const userId = req.user?.userId;
+            if (!userId) {
+                return res.status(401).json({ message: 'Unauthorized' });
+            }
+
+            const historyId = parseInt(req.params.historyId, 10);
+            if (isNaN(historyId)) {
+                return res.status(400).json({ message: 'Invalid history ID' });
+            }
+
+            const { comment, articleThemes } = req.body;
+            if (!comment || typeof comment !== 'string' || comment.trim().length === 0) {
+                return res.status(400).json({ message: 'Comment is required' });
+            }
+
+            // Анализируем тональность комментария один раз при сохранении
+            const { analyzeCommentSentiment } = await import('../services/semantic.service');
+            const sentimentResult = await analyzeCommentSentiment(comment);
+            
+            // Сохраняем комментарий, теги статьи и тональность в analysis_history
+            try {
+                const AnalysisHistory = (await import('../models/AnalysisHistory')).default;
+                const historyRecord = await AnalysisHistory.findByPk(historyId);
+                
+                if (historyRecord && historyRecord.userId === userId) {
+                    // Сохраняем комментарий, теги статьи и тональность в JSON формате
+                    const commentData = {
+                        comment: comment,
+                        articleThemes: articleThemes || [],
+                        sentiment: sentimentResult.sentiment, // Сохраняем тональность
+                        createdAt: new Date().toISOString()
+                    };
+                    
+                    // Добавляем к существующему reasoning или создаем новый
+                    let updatedReasoning = historyRecord.reasoning || '';
+                    if (updatedReasoning.includes('[COMMENT_DATA]')) {
+                        // Заменяем существующий комментарий
+                        updatedReasoning = updatedReasoning.replace(
+                            /\[COMMENT_DATA\][\s\S]*?\[END_COMMENT_DATA\]/,
+                            `[COMMENT_DATA]${JSON.stringify(commentData)}[END_COMMENT_DATA]`
+                        );
+                    } else {
+                        // Добавляем новый комментарий
+                        updatedReasoning += `\n\n[COMMENT_DATA]${JSON.stringify(commentData)}[END_COMMENT_DATA]`;
+                    }
+                    
+                    await historyRecord.update({ reasoning: updatedReasoning });
+                    console.log(`💾 [saveAnalysisComment] Saved comment (sentiment: ${sentimentResult.sentiment}) and ${articleThemes?.length || 0} article themes to analysis_history ID: ${historyId}`);
+                }
+            } catch (dbError: any) {
+                console.warn(`⚠️ [saveAnalysisComment] Failed to save comment to DB: ${dbError.message}`);
+            }
+
+            return res.status(200).json({ 
+                message: 'Comment saved successfully',
+                commentSaved: true
+            });
+        } catch (error: any) {
+            console.error('Error saving comment:', error);
+            return res.status(500).json({ 
+                message: 'Server error', 
+                error: error.message || 'Unknown error' 
+            });
+        }
+    }
 }
 export default new UserController();

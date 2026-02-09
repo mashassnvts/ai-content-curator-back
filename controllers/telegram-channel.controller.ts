@@ -5,6 +5,7 @@ import { getChannelInfo, processPostUrl } from '../services/telegram-channel.ser
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { processSingleUrlAnalysis } from './analysis.controller';
 import UserInterest from '../models/UserInterest';
+import { getUserTagsCached } from '../services/semantic.service';
 
 /**
  * GET /api/telegram-channels
@@ -61,11 +62,31 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
-        const { channelUsername, postUrl, checkFrequency = 'daily' } = req.body;
+        const { channelUsername, postUrl, checkFrequency = 'daily', initialPostsCount = 10 } = req.body;
+
+        // Если передан postUrl или channelUsername содержит ссылку на канал/пост
+        let actualPostUrl = postUrl;
+        let actualChannelUsername = channelUsername;
+        
+        // Проверяем, является ли channelUsername ссылкой на канал или пост
+        if (channelUsername && !actualPostUrl) {
+            const telegramUrlMatch = channelUsername.match(/https?:\/\/t\.me\/([^\/]+)(?:\/(\d+))?/);
+            if (telegramUrlMatch) {
+                const [, username, messageId] = telegramUrlMatch;
+                if (messageId) {
+                    // Это ссылка на пост
+                    actualPostUrl = channelUsername;
+                    actualChannelUsername = undefined;
+                } else {
+                    // Это ссылка на канал
+                    actualChannelUsername = username;
+                }
+            }
+        }
 
         // Если передан postUrl, обрабатываем как ссылку на пост
-        if (postUrl) {
-            const postInfo = await processPostUrl(postUrl);
+        if (actualPostUrl) {
+            const postInfo = await processPostUrl(actualPostUrl);
             if (!postInfo) {
                 return res.status(400).json({ 
                     message: 'Invalid post URL format. Expected: https://t.me/channel_username/message_id',
@@ -95,30 +116,30 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
             }
 
             // Сохраняем пост
-            const match = postUrl.match(/https?:\/\/t\.me\/[^\/]+\/(\d+)/);
+            const match = actualPostUrl.match(/https?:\/\/t\.me\/[^\/]+\/(\d+)/);
             const messageId = match ? parseInt(match[1], 10) : Date.now();
 
             const channelPost = await TelegramChannelPost.create({
                 channelId: channel.id,
                 messageId,
-                postUrl: postUrl,
+                postUrl: actualPostUrl,
                 postText: postInfo.text
             });
 
             // Сразу анализируем пост
             let analysisResult = null;
             try {
-                // Получаем интересы пользователя
-                const userInterests = await UserInterest.findAll({
-                    where: { userId, isActive: true }
-                });
-                const interests = userInterests.map(ui => ui.interest).join(', ');
+                // Получаем теги пользователя (облако смыслов) — приоритет над интересами
+                const userTags = await getUserTagsCached(userId);
+                let contextForAnalysis = userTags.length > 0
+                    ? userTags.map(t => t.tag).join(', ')
+                    : (await UserInterest.findAll({ where: { userId, isActive: true } })).map(ui => ui.interest).join(', ');
 
-                if (interests) {
-                    console.log(`🔍 [telegram-channel] Analyzing post ${postUrl} for user ${userId}...`);
+                if (contextForAnalysis) {
+                    console.log(`🔍 [telegram-channel] Analyzing post ${actualPostUrl} for user ${userId}...`);
                     analysisResult = await processSingleUrlAnalysis(
-                        postUrl,
-                        interests,
+                        actualPostUrl,
+                        contextForAnalysis,
                         [], // feedbackHistory
                         userId,
                         'unread' // режим "стоит ли читать"
@@ -167,7 +188,7 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
         }
 
         // Если передан channelUsername, добавляем канал для мониторинга
-        if (!channelUsername) {
+        if (!actualChannelUsername) {
             return res.status(400).json({ 
                 message: 'channelUsername or postUrl is required',
                 error: 'Missing required field'
@@ -175,7 +196,7 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
         }
 
         // Убираем @ если есть
-        const username = channelUsername.replace('@', '').trim();
+        const username = actualChannelUsername.replace('@', '').trim();
         if (!username) {
             return res.status(400).json({ 
                 message: 'Invalid channel username',
@@ -184,41 +205,151 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
         }
 
         // Проверяем, не добавлен ли уже этот канал
-        const existingChannel = await TelegramChannel.findOne({
+        let channel = await TelegramChannel.findOne({
             where: {
                 userId,
                 channelUsername: username
             }
         });
 
-        if (existingChannel) {
-            return res.status(400).json({ 
-                message: 'Channel already added',
-                error: 'Duplicate channel'
+        if (!channel) {
+            // Получаем информацию о канале и создаем запись
+            const channelInfo = await getChannelInfo(username);
+            channel = await TelegramChannel.create({
+                userId,
+                channelUsername: username,
+                channelId: channelInfo?.id || null,
+                isActive: true,
+                checkFrequency: checkFrequency as 'daily' | 'weekly'
             });
+        } else {
+            console.log(`ℹ️ [telegram-channel] Channel @${username} already added for user ${userId}, analyzing latest posts...`);
         }
 
-        // Получаем информацию о канале
-        const channelInfo = await getChannelInfo(username);
+        // Анализируем последние N постов из канала (по умолчанию 6, можно настроить через initialPostsCount)
+        const postsToAnalyze = Math.min(Math.max(parseInt(String(initialPostsCount)) || 6, 1), 20);
         
-        // Создаем запись о канале
-        const channel = await TelegramChannel.create({
-            userId,
-            channelUsername: username,
-            channelId: channelInfo?.id || null,
-            isActive: true,
-            checkFrequency: checkFrequency as 'daily' | 'weekly'
-        });
+        // Запрашиваем больше постов (буфер), т.к. страница может подгрузить не все — потом возьмём нужное количество
+        const fetchLimit = Math.max(postsToAnalyze + 5, 15);
+        
+        console.log(`📊 [telegram-channel] Will analyze last ${postsToAnalyze} posts from @${username} for user ${userId} (fetching up to ${fetchLimit})`);
+        const { getChannelPosts } = await import('../services/telegram-channel.service');
+        const allFetched = await getChannelPosts(username, fetchLimit);
+        const posts = allFetched.slice(0, postsToAnalyze);
+        
+        const analyzedPosts: Array<{
+            url: string;
+            score: number;
+            verdict: string;
+            summary?: string;
+            text?: string;
+        }> = [];
+        
+        let relevantCount = 0;
+        
+        if (posts.length > 0) {
+            // Получаем теги пользователя (облако смыслов) — приоритет над интересами
+            const userTags = await getUserTagsCached(userId);
+            const contextForAnalysis = userTags.length > 0
+                ? userTags.map(t => t.tag).join(', ')
+                : (await UserInterest.findAll({ where: { userId, isActive: true } })).map(ui => ui.interest).join(', ');
+
+            if (!contextForAnalysis) {
+                console.log(`ℹ️ [telegram-channel] No tags or interests for user ${userId}, skipping post analysis`);
+            }
+
+            if (contextForAnalysis && posts.length > 0) {
+                console.log(`🔍 [telegram-channel] Analyzing ${posts.length} posts from @${username} for user ${userId}...`);
+                
+                // Анализируем каждый пост
+                for (const post of posts) {
+                    if (post.url) {
+                        try {
+                            const analysisResult = await processSingleUrlAnalysis(
+                                post.url,
+                                contextForAnalysis,
+                                [],
+                                userId,
+                                'unread' // режим "стоит ли читать"
+                            );
+
+                            if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
+                                const result = analysisResult as any;
+                                if (result && typeof result.score === 'number' && typeof result.verdict === 'string') {
+                                    analyzedPosts.push({
+                                        url: post.url,
+                                        score: result.score,
+                                        verdict: result.verdict,
+                                        summary: typeof result.summary === 'string' ? result.summary : undefined,
+                                        text: post.text || undefined
+                                    });
+                                    
+                                    // Сохраняем пост в БД
+                                    const match = post.url.match(/https?:\/\/t\.me\/[^\/]+\/(\d+)/);
+                                    const messageId = match ? parseInt(match[1], 10) : post.messageId;
+                                    
+                                    let channelPost = await TelegramChannelPost.findOne({
+                                        where: {
+                                            channelId: channel.id,
+                                            messageId
+                                        }
+                                    });
+                                    
+                                    if (!channelPost) {
+                                        channelPost = await TelegramChannelPost.create({
+                                            channelId: channel.id,
+                                            messageId,
+                                            postUrl: post.url,
+                                            postText: post.text
+                                        });
+                                    }
+                                    
+                                    if (result.analysisHistoryId) {
+                                        await channelPost.update({
+                                            analysisHistoryId: result.analysisHistoryId
+                                        });
+                                    }
+                                    
+                                    if (result.score >= 70) {
+                                        relevantCount++;
+                                    }
+                                }
+                            }
+                        } catch (analysisError: any) {
+                            console.error(`⚠️ [telegram-channel] Failed to analyze post ${post.url}:`, analysisError.message);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Формируем рекомендацию на основе результатов
+        let recommendation = '';
+        if (analyzedPosts.length === 0) {
+            recommendation = posts.length === 0
+                ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.'
+                : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов: проанализируйте статьи в режиме "Я прочитал и понравилось".';
+        } else if (relevantCount === 0) {
+            recommendation = `Проанализировано ${analyzedPosts.length} постов. К сожалению, ни один из них не совпадает с вашими тегами в облаке смыслов (порог релевантности: 70%). Возможно, стоит пересмотреть выбор канала или проанализировать больше статей в режиме "Я прочитал и понравилось".`;
+        } else {
+            recommendation = `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных постов (${Math.round(relevantCount / analyzedPosts.length * 100)}%), которые могут быть вам интересны. Канал стоит читать!`;
+        }
 
         return res.status(201).json({
             success: true,
-            message: 'Channel added successfully',
+            message: 'Channel analyzed successfully',
             channel: {
                 id: channel.id,
                 channelUsername: channel.channelUsername,
                 channelId: channel.channelId,
                 isActive: channel.isActive,
                 checkFrequency: channel.checkFrequency
+            },
+            analysis: {
+                totalPosts: analyzedPosts.length,
+                relevantPosts: relevantCount,
+                posts: analyzedPosts,
+                recommendation
             }
         });
     } catch (error: any) {

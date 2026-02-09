@@ -10,6 +10,9 @@ if (!apiKey) {
 
 const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
 
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const IS_DEBUG = LOG_LEVEL === 'debug';
+
 // Очередь запросов для предотвращения rate limiting (используем ту же логику, что и в ai.service.ts)
 class RequestQueue {
     private queue: Array<() => Promise<any>> = [];
@@ -79,7 +82,9 @@ export async function getUserTagsCached(userId: number): Promise<Array<{ tag: st
     
     // Проверяем, есть ли валидный кэш
     if (cached && (now - cached.timestamp) < CACHE_TTL) {
-        console.log(`📦 [getUserTagsCached] Using cached tags for user ${userId}`);
+        if (IS_DEBUG) {
+            console.log(`📦 [getUserTagsCached] Using cached tags for user ${userId}`);
+        }
         return cached.tags;
     }
     
@@ -102,7 +107,9 @@ export async function getUserTagsCached(userId: number): Promise<Array<{ tag: st
         timestamp: now
     });
     
-    console.log(`💾 [getUserTagsCached] Loaded ${tagsWithWeights.length} tags from DB for user ${userId}`);
+    if (IS_DEBUG) {
+        console.log(`💾 [getUserTagsCached] Loaded ${tagsWithWeights.length} tags from DB for user ${userId}`);
+    }
     return tagsWithWeights;
 }
 
@@ -111,7 +118,9 @@ export async function getUserTagsCached(userId: number): Promise<Array<{ tag: st
  */
 export function clearUserTagsCache(userId: number): void {
     userTagsCache.delete(userId);
-    console.log(`🗑️ [clearUserTagsCache] Cleared cache for user ${userId}`);
+    if (IS_DEBUG) {
+        console.log(`🗑️ [clearUserTagsCache] Cleared cache for user ${userId}`);
+    }
 }
 
 /**
@@ -662,25 +671,230 @@ export async function saveUserSemanticTags(userId: number, themes: string[]): Pr
 }
 
 /**
+ * Сохраняет семантические теги пользователя с указанным весом
+ * Используется для комментариев - теги из комментария получают больший вес (показывают особый интерес)
+ * 
+ * @param userId - ID пользователя
+ * @param themes - Массив тем для сохранения
+ * @param initialWeight - Начальный вес для новых тегов (по умолчанию 1.0, для комментариев можно 2.0)
+ */
+export async function saveUserSemanticTagsWithWeight(
+    userId: number, 
+    themes: string[], 
+    initialWeight: number = 1.0
+): Promise<void> {
+    if (!themes || themes.length === 0) {
+        return;
+    }
+
+    const MAX_TAG_LENGTH = 255;
+    const WEIGHT_INCREMENT = 0.5;
+    
+    try {
+        const now = new Date();
+        let savedCount = 0;
+        let skippedCount = 0;
+        let errorCount = 0;
+        let mergedCount = 0;
+        
+        const existingTags = await UserSemanticTag.findAll({
+            where: { userId },
+            attributes: ['tag', 'weight']
+        });
+        const existingTagsList = existingTags.map(t => ({
+            tag: t.tag,
+            weight: parseFloat(t.weight.toString())
+        }));
+        
+        for (const theme of themes) {
+            let normalizedTheme = normalizeTheme(theme);
+            
+            if (!normalizedTheme || normalizedTheme.length === 0) {
+                skippedCount++;
+                continue;
+            }
+            
+            if (normalizedTheme.length > MAX_TAG_LENGTH) {
+                normalizedTheme = normalizedTheme.substring(0, MAX_TAG_LENGTH);
+            }
+            
+            const duplicate = findDuplicateTag(normalizedTheme, existingTagsList);
+            if (duplicate) {
+                try {
+                    const existingTag = await UserSemanticTag.findOne({
+                        where: {
+                            userId,
+                            tag: duplicate.tag
+                        }
+                    });
+                    
+                    if (existingTag) {
+                        const currentWeight = parseFloat(existingTag.weight.toString());
+                        // Для комментариев увеличиваем вес больше
+                        existingTag.weight = currentWeight + (initialWeight > 1.0 ? initialWeight : WEIGHT_INCREMENT);
+                        existingTag.lastUsedAt = now;
+                        await existingTag.save();
+                        mergedCount++;
+                    }
+                } catch (error: any) {
+                    errorCount++;
+                    console.warn(`⚠️ [saveUserSemanticTagsWithWeight] Failed to update duplicate tag "${normalizedTheme}": ${error.message}`);
+                }
+            } else {
+                try {
+                    const [tag, created] = await UserSemanticTag.findOrCreate({
+                        where: {
+                            userId,
+                            tag: normalizedTheme,
+                        },
+                        defaults: {
+                            userId,
+                            tag: normalizedTheme,
+                            weight: initialWeight, // Используем указанный вес
+                            lastUsedAt: now,
+                        },
+                    });
+
+                    if (!created) {
+                        const currentWeight = parseFloat(tag.weight.toString());
+                        tag.weight = currentWeight + (initialWeight > 1.0 ? initialWeight : WEIGHT_INCREMENT);
+                        tag.lastUsedAt = now;
+                        await tag.save();
+                    }
+                    savedCount++;
+                } catch (error: any) {
+                    errorCount++;
+                    console.warn(`⚠️ [saveUserSemanticTagsWithWeight] Failed to save tag "${normalizedTheme}": ${error.message}`);
+                }
+            }
+        }
+        
+        console.log(`✅ [saveUserSemanticTagsWithWeight] Saved ${savedCount} tags (${mergedCount} merged, ${skippedCount} skipped, ${errorCount} errors) with weight ${initialWeight}`);
+    } catch (error: any) {
+        console.error(`❌ [saveUserSemanticTagsWithWeight] Error saving semantic tags for user ${userId}: ${error.message}`);
+    }
+}
+
+/**
+ * Анализирует тональность комментария (положительный/отрицательный)
+ * @param comment - Текст комментария
+ * @returns Объект с тональностью и модификатором веса
+ */
+export async function analyzeCommentSentiment(comment: string): Promise<{ sentiment: 'positive' | 'negative' | 'neutral'; weightModifier: number }> {
+    try {
+        const prompt = `Проанализируй тональность комментария пользователя к статье. Определи, нравится ли статья пользователю или нет.
+
+Комментарий: "${comment}"
+
+Ответь ТОЛЬКО одним словом: "positive" (нравится), "negative" (не нравится) или "neutral" (нейтрально).`;
+
+        // Используем ту же модель, что и в других местах (или из env)
+        const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
+        
+        const result = await apiRequestQueue.add(() => 
+            genAI.models.generateContent({
+                model: aiModel,
+                contents: prompt,
+            })
+        ) as any;
+
+        // Извлекаем текст ответа (как в других местах кода)
+        let responseText = '';
+        if (result.text) {
+            responseText = result.text;
+        } else if (result.response && result.response.text) {
+            responseText = result.response.text();
+        } else if (typeof result === 'string') {
+            responseText = result;
+        } else {
+            responseText = 'neutral';
+        }
+        responseText = responseText.trim().toLowerCase();
+        if (responseText.includes('positive') || responseText.includes('нравится')) {
+            return { sentiment: 'positive', weightModifier: 1.5 }; // Увеличиваем вес
+        } else if (responseText.includes('negative') || responseText.includes('не нравится')) {
+            return { sentiment: 'negative', weightModifier: 0.5 }; // Уменьшаем вес
+        }
+        return { sentiment: 'neutral', weightModifier: 1.0 };
+    } catch (error: any) {
+        console.warn(`⚠️ [analyzeCommentSentiment] Failed to analyze sentiment: ${error.message}`);
+        return { sentiment: 'neutral', weightModifier: 1.0 };
+    }
+}
+
+/**
+ * Получает теги из статей с комментариями пользователя
+ * @param userId - ID пользователя
+ * @returns Массив объектов с тегами статьи и комментарием
+ */
+async function getCommentedArticlesThemes(userId: number): Promise<Array<{ themes: string[]; comment: string; sentiment: 'positive' | 'negative' | 'neutral' }>> {
+    try {
+        const AnalysisHistory = (await import('../models/AnalysisHistory')).default;
+        const historyRecords = await AnalysisHistory.findAll({
+            where: { userId },
+            attributes: ['reasoning'],
+            order: [['createdAt', 'DESC']],
+            limit: 50 // Берем последние 50 статей
+        });
+
+        const commentedArticles: Array<{ themes: string[]; comment: string; sentiment: 'positive' | 'negative' | 'neutral' }> = [];
+
+        for (const record of historyRecords) {
+            if (record.reasoning && record.reasoning.includes('[COMMENT_DATA]')) {
+                const match = record.reasoning.match(/\[COMMENT_DATA\](.*?)\[END_COMMENT_DATA\]/);
+                if (match) {
+                    try {
+                        const commentData = JSON.parse(match[1]);
+                        if (commentData.comment && commentData.articleThemes && Array.isArray(commentData.articleThemes)) {
+                            // Используем сохраненную тональность (если есть) или анализируем
+                            const sentiment = commentData.sentiment || (await analyzeCommentSentiment(commentData.comment)).sentiment;
+                            commentedArticles.push({
+                                themes: commentData.articleThemes,
+                                comment: commentData.comment,
+                                sentiment: sentiment
+                            });
+                        }
+                    } catch (parseError) {
+                        console.warn('Failed to parse comment data:', parseError);
+                    }
+                }
+            }
+        }
+
+        return commentedArticles;
+    } catch (error: any) {
+        console.warn(`⚠️ [getCommentedArticlesThemes] Failed to get commented articles: ${error.message}`);
+        return [];
+    }
+}
+
+/**
+ * Результат сравнения тем статьи с тегами пользователя
+ */
+export interface ThemeComparisonResult {
+    matchPercentage: number;
+    matchedThemes: Array<{ theme: string; userTag: string; weight: number }>;
+    unmatchedArticleThemes: string[];
+    totalUserTagsWeight: number;
+    matchedWeight: number;
+    hasNoTags: boolean;
+    semanticVerdict?: string;
+}
+
+/**
  * Сравнивает темы статьи с тегами пользователя из "облака смыслов"
  * Используется в режиме 'unread' для определения релевантности статьи на основе семантики
  * 
  * @param articleThemes - Темы, извлеченные из статьи
  * @param userTags - Теги пользователя из БД (с весами)
+ * @param userId - ID пользователя (опционально, для учета комментариев)
  * @returns Результат сравнения с информацией о совпадениях и проценте релевантности
  */
-export function compareThemes(
+export async function compareThemes(
     articleThemes: string[],
-    userTags: Array<{ tag: string; weight: number }>
-): {
-    matchPercentage: number; // Процент совпадения (0-100)
-    matchedThemes: Array<{ theme: string; userTag: string; weight: number }>; // Совпавшие темы
-    unmatchedArticleThemes: string[]; // Темы статьи, которых нет у пользователя
-    totalUserTagsWeight: number; // Суммарный вес всех тегов пользователя
-    matchedWeight: number; // Суммарный вес совпавших тегов
-    hasNoTags: boolean; // Флаг, что у пользователя нет тегов
-    semanticVerdict?: string; // AI-рекомендация (добавляется отдельно после сравнения)
-} {
+    userTags: Array<{ tag: string; weight: number }>,
+    userId?: number
+): Promise<ThemeComparisonResult> {
     if (!articleThemes || articleThemes.length === 0) {
         return {
             matchPercentage: 0,
@@ -786,6 +1000,38 @@ export function compareThemes(
         }
     }
 
+    // УЧЕТ КОММЕНТАРИЕВ: Проверяем совпадения с тегами из статей с комментариями
+    let commentBoost = 0;
+    if (userId) {
+        try {
+            const commentedArticles = await getCommentedArticlesThemes(userId);
+            
+            // Проверяем совпадения тегов новой статьи с тегами из статей с комментариями
+            for (const commentedArticle of commentedArticles) {
+                const commonThemes = articleThemes.filter(theme => 
+                    commentedArticle.themes.some(ct => 
+                        normalizeTagForComparison(theme) === normalizeTagForComparison(ct)
+                    )
+                );
+                
+                if (commonThemes.length > 0) {
+                    // Если есть совпадения, учитываем тональность комментария
+                    if (commentedArticle.sentiment === 'positive') {
+                        // Положительный комментарий - увеличиваем вес совпавших тегов
+                        commentBoost += commonThemes.length * 0.3; // +0.3% за каждое совпадение
+                        console.log(`📌 [compareThemes] Found ${commonThemes.length} matching themes with positive comment`);
+                    } else if (commentedArticle.sentiment === 'negative') {
+                        // Отрицательный комментарий - уменьшаем вес
+                        commentBoost -= commonThemes.length * 0.2; // -0.2% за каждое совпадение
+                        console.log(`📌 [compareThemes] Found ${commonThemes.length} matching themes with negative comment`);
+                    }
+                }
+            }
+        } catch (error: any) {
+            console.warn(`⚠️ [compareThemes] Failed to check commented articles: ${error.message}`);
+        }
+    }
+
     // Вычисляем процент совпадения комбинированным способом
     const matchedWeight = matchedThemes.reduce((sum, match) => sum + match.weight, 0);
     
@@ -823,8 +1069,11 @@ export function compareThemes(
         combinedMatchPercentage = Math.max(combinedMatchPercentage, Math.round(articleMatchRatio * 100));
     }
     
-    // Ограничиваем процент до 100
-    const finalMatchPercentage = Math.min(combinedMatchPercentage, 100);
+    // Применяем бонус/штраф от комментариев
+    combinedMatchPercentage += commentBoost;
+    
+    // Ограничиваем процент до 0-100
+    const finalMatchPercentage = Math.max(0, Math.min(Math.round(combinedMatchPercentage), 100));
 
     console.log(`📊 [compareThemes] Comparison result: ${finalMatchPercentage}% match (${matchedThemes.length}/${normalizedArticleThemes.length} themes matched)`);
     

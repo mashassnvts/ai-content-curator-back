@@ -10,6 +10,9 @@ if (!apiKey) {
 
 const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
 
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
+const IS_DEBUG = LOG_LEVEL === 'debug';
+
 // Очередь запросов для предотвращения rate limiting
 class RequestQueue {
     private queue: Array<() => Promise<any>> = [];
@@ -99,7 +102,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
                         });
                     } catch (simpleError: any) {
                         // Если простой формат не работает, пробуем с массивом
-                        console.log(`⚠️ [generateEmbedding] Simple format failed, trying array: ${simpleError.message}`);
+                        if (IS_DEBUG) {
+                            console.log(`⚠️ [generateEmbedding] Simple format failed, trying array: ${simpleError.message}`);
+                        }
                         result = await genAI.models.embedContent({
                             model: 'gemini-embedding-001',
                             contents: text
@@ -149,7 +154,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         const targetDimension = 768;
         let finalEmbedding: number[];
         if (validEmbedding.length > targetDimension) {
-            console.log(`📊 [generateEmbedding] Truncating embedding from ${validEmbedding.length} to ${targetDimension} dimensions`);
+            if (IS_DEBUG) {
+                console.log(`📊 [generateEmbedding] Truncating embedding from ${validEmbedding.length} to ${targetDimension} dimensions`);
+            }
             finalEmbedding = validEmbedding.slice(0, targetDimension);
         } else if (validEmbedding.length < targetDimension) {
             console.warn(`⚠️ [generateEmbedding] Embedding dimension is ${validEmbedding.length}, expected at least ${targetDimension}`);
@@ -158,7 +165,9 @@ export async function generateEmbedding(text: string): Promise<number[]> {
             finalEmbedding = validEmbedding;
         }
 
-        console.log(`✅ [generateEmbedding] Generated embedding (dimension: ${finalEmbedding.length})`);
+        if (IS_DEBUG) {
+            console.log(`✅ [generateEmbedding] Generated embedding (dimension: ${finalEmbedding.length})`);
+        }
         return finalEmbedding;
 
     } catch (error: any) {
@@ -196,7 +205,9 @@ export async function saveEmbedding(analysisHistoryId: number, embedding: number
             // Не указываем type для UPDATE запросов
         });
 
-        console.log(`✅ [saveEmbedding] Saved embedding for analysis_history ID: ${analysisHistoryId}`);
+        if (IS_DEBUG) {
+            console.log(`✅ [saveEmbedding] Saved embedding for analysis_history ID: ${analysisHistoryId}`);
+        }
     } catch (error: any) {
         console.error(`❌ [saveEmbedding] Error saving embedding: ${error.message}`);
         throw error;
@@ -242,18 +253,26 @@ export async function findSimilarArticles(
         if (userId) {
             whereClause += ' AND "userId" = $userId';
             bindParams.userId = userId;
-            console.log(`🔍 [findSimilarArticles] Filtering by userId: ${userId}`);
+            if (IS_DEBUG) {
+                console.log(`🔍 [findSimilarArticles] Filtering by userId: ${userId}`);
+            }
         } else {
-            console.log(`🔍 [findSimilarArticles] No userId filter - searching all users`);
+            if (IS_DEBUG) {
+                console.log(`🔍 [findSimilarArticles] No userId filter - searching all users`);
+            }
         }
 
         if (excludeId) {
             whereClause += ' AND id != $excludeId';
             bindParams.excludeId = excludeId;
-            console.log(`🔍 [findSimilarArticles] Excluding article ID: ${excludeId}`);
+            if (IS_DEBUG) {
+                console.log(`🔍 [findSimilarArticles] Excluding article ID: ${excludeId}`);
+            }
         }
 
-        console.log(`🔍 [findSimilarArticles] Similarity threshold: ${similarityThreshold} (distance threshold: ${bindParams.threshold})`);
+        if (IS_DEBUG) {
+            console.log(`🔍 [findSimilarArticles] Similarity threshold: ${similarityThreshold} (distance threshold: ${bindParams.threshold})`);
+        }
 
         // Улучшенный запрос: используем cosine similarity напрямую
         // 1 - (embedding <=> $embedding) дает similarity от 0 до 1
@@ -278,7 +297,9 @@ export async function findSimilarArticles(
             similarity: number | string;
         }>;
         
-        console.log(`📊 [findSimilarArticles] Raw results from DB: ${results.length} articles`);
+        if (IS_DEBUG) {
+            console.log(`📊 [findSimilarArticles] Raw results from DB: ${results.length} articles`);
+        }
         
         // Преобразуем similarity в число, если это строка
         const normalizedResults = results.map(r => ({
@@ -290,12 +311,14 @@ export async function findSimilarArticles(
         // (на случай, если SQL запрос вернул результаты ниже порога из-за округления)
         const filteredResults = normalizedResults.filter(r => r.similarity >= similarityThreshold);
         
-        console.log(`✅ [findSimilarArticles] Found ${filteredResults.length} similar articles (after filtering by threshold ${similarityThreshold})`);
-        if (filteredResults.length > 0) {
-            console.log(`📋 [findSimilarArticles] Top result: ID ${filteredResults[0].id}, similarity: ${filteredResults[0].similarity}`);
-        } else if (normalizedResults.length > 0) {
-            console.log(`⚠️ [findSimilarArticles] All ${normalizedResults.length} results were below threshold ${similarityThreshold}`);
-            console.log(`📋 [findSimilarArticles] Top result (below threshold): ID ${normalizedResults[0].id}, similarity: ${normalizedResults[0].similarity}`);
+        if (IS_DEBUG) {
+            console.log(`✅ [findSimilarArticles] Found ${filteredResults.length} similar articles (after filtering by threshold ${similarityThreshold})`);
+            if (filteredResults.length > 0) {
+                console.log(`📋 [findSimilarArticles] Top result: ID ${filteredResults[0].id}, similarity: ${filteredResults[0].similarity}`);
+            } else if (normalizedResults.length > 0) {
+                console.log(`⚠️ [findSimilarArticles] All ${normalizedResults.length} results were below threshold ${similarityThreshold}`);
+                console.log(`📋 [findSimilarArticles] Top result (below threshold): ID ${normalizedResults[0].id}, similarity: ${normalizedResults[0].similarity}`);
+            }
         }
         
         return filteredResults;

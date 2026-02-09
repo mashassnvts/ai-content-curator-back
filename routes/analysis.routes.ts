@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { analyzeContent, guestAnalyzeContent, testExtractThemes, findSimilarArticlesEndpoint } from '../controllers/analysis.controller';
 import { getHistory, getHistoryItem, reanalyzeFromHistory } from '../controllers/history.controller';
+import UserController from '../controllers/user.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
@@ -12,5 +13,6 @@ router.post('/test-extract-themes', testExtractThemes); // Тестовый эн
 router.get('/history', authMiddleware, getHistory);
 router.get('/history/:id', authMiddleware, getHistoryItem);
 router.get('/history/:id/reanalyze', authMiddleware, reanalyzeFromHistory);
+router.post('/history/:historyId/comment', authMiddleware, UserController.saveAnalysisComment); // Сохранение комментария к анализу
 
 export default router;

@@ -47,14 +47,12 @@ async function analyzeChannelForUser(
     const relevantPosts: Array<{ url: string; score: number; verdict: string }> = [];
     let lastMessageId = channel.lastPostMessageId || 0;
 
-    // Получаем активные интересы пользователя напрямую из БД
-    const userInterests = await UserInterest.findAll({
-        where: {
-            userId,
-            isActive: true
-        }
-    });
-    const interests = userInterests.map(ui => ui.interest);
+    // Получаем теги пользователя (облако смыслов) — приоритет над интересами
+    const { getUserTagsCached } = await import('./semantic.service');
+    const userTags = await getUserTagsCached(userId);
+    const interests = userTags.length > 0
+        ? userTags.map(t => t.tag)
+        : (await UserInterest.findAll({ where: { userId, isActive: true } })).map(ui => ui.interest);
 
     // Анализируем каждый пост
     for (const post of posts) {
@@ -227,6 +225,49 @@ export async function checkAllChannels(): Promise<void> {
         console.log(`✅ [telegram-channel-monitor] Channel check completed: ${totalAnalyzed} analyzed, ${totalRelevant} relevant`);
     } catch (error: any) {
         console.error(`❌ [telegram-channel-monitor] Error in checkAllChannels:`, error.message);
+    }
+}
+
+export async function checkUserChannelsNow(userId: number): Promise<void> {
+    try {
+        console.log(`🔍 [telegram-channel-monitor] On-demand check: user ${userId}`);
+
+        const channelsToCheck = await TelegramChannel.findAll({
+            where: {
+                isActive: true,
+                userId
+            },
+            include: [{
+                model: User,
+                required: true
+            }]
+        });
+
+        if (channelsToCheck.length === 0) {
+            console.log(`ℹ️ [telegram-channel-monitor] On-demand: no active channels for user ${userId}`);
+            return;
+        }
+
+        console.log(`📊 [telegram-channel-monitor] On-demand: found ${channelsToCheck.length} channel(s) for user ${userId}`);
+
+        let totalAnalyzed = 0;
+        let totalRelevant = 0;
+
+        for (const channel of channelsToCheck) {
+            try {
+                console.log(`🔍 [telegram-channel-monitor] On-demand: checking @${channel.channelUsername} for user ${userId}...`);
+                const result = await analyzeChannelForUser(channel, userId);
+                totalAnalyzed += result.analyzed;
+                totalRelevant += result.relevant;
+                console.log(`✅ [telegram-channel-monitor] On-demand @${channel.channelUsername}: analyzed ${result.analyzed}, relevant ${result.relevant}`);
+            } catch (error: any) {
+                console.error(`❌ [telegram-channel-monitor] On-demand: error checking @${channel.channelUsername} for user ${userId}:`, error.message);
+            }
+        }
+
+        console.log(`✅ [telegram-channel-monitor] On-demand check completed for user ${userId}: ${totalAnalyzed} analyzed, ${totalRelevant} relevant`);
+    } catch (error: any) {
+        console.error(`❌ [telegram-channel-monitor] On-demand check failed for user ${userId}:`, error.message);
     }
 }
 

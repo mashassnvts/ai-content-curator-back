@@ -5,12 +5,12 @@ import User from './User';
 interface TelegramChannelAttributes {
     id: number;
     userId: number;
-    channelUsername: string; // Например, "ai_news" (без @)
-    channelId?: number | null; // ID канала в Telegram (если доступен)
-    isActive: boolean; // Активен ли мониторинг канала
-    lastCheckedAt?: Date | null; // Когда последний раз проверяли канал
-    lastPostMessageId?: number | null; // ID последнего обработанного поста
-    checkFrequency: 'daily' | 'weekly'; // Частота проверки
+    channelUsername: string;
+    channelId?: number | null;
+    isActive: boolean;
+    lastCheckedAt?: Date | null;
+    lastPostMessageId?: number | null;
+    checkFrequency: 'daily' | 'weekly';
 }
 
 interface TelegramChannelCreationAttributes extends Optional<TelegramChannelAttributes, 'id' | 'isActive' | 'checkFrequency'> {}
@@ -48,13 +48,11 @@ TelegramChannel.init({
         type: DataTypes.STRING(255),
         allowNull: false,
         field: 'channel_username',
-        comment: 'Username канала без @, например "ai_news"',
     },
     channelId: {
         type: DataTypes.BIGINT,
         allowNull: true,
         field: 'channel_id',
-        comment: 'ID канала в Telegram (если доступен)',
     },
     isActive: {
         type: DataTypes.BOOLEAN,
@@ -73,7 +71,7 @@ TelegramChannel.init({
         field: 'last_post_message_id',
     },
     checkFrequency: {
-        type: DataTypes.ENUM('daily', 'weekly'),
+        type: DataTypes.STRING(20),
         allowNull: false,
         defaultValue: 'daily',
         field: 'check_frequency',
@@ -82,7 +80,7 @@ TelegramChannel.init({
     tableName: 'telegram_channels',
     sequelize,
     timestamps: true,
-    underscored: true, // Использовать snake_case для имен столбцов (created_at, updated_at)
+    underscored: true,
     indexes: [
         { fields: ['user_id'] },
         { fields: ['is_active', 'last_checked_at'] },

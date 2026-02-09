@@ -272,6 +272,28 @@ class UserService {
         const tags = await UserSemanticTag.findAll(queryOptions);
         return tags;
     }
+
+    /**
+     * Удаляет семантический тег пользователя
+     * @param userId - ID пользователя
+     * @param tagId - ID тега для удаления
+     * @returns true если тег был удален, false если не найден
+     */
+    async deleteSemanticTag(userId: number, tagId: number): Promise<boolean> {
+        const tag = await UserSemanticTag.findOne({
+            where: {
+                id: tagId,
+                userId: userId // Проверяем, что тег принадлежит пользователю
+            }
+        });
+
+        if (!tag) {
+            return false;
+        }
+
+        await tag.destroy();
+        return true;
+    }
 }
 
 export default new UserService();

@@ -191,8 +191,13 @@ const startServer = async () => {
 
             // Запускаем мониторинг Telegram-каналов
             const channelCheckIntervalHours = parseInt(process.env.TELEGRAM_CHANNEL_CHECK_INTERVAL_HOURS || '6', 10);
-            console.log(`📢 Starting Telegram channel monitoring (every ${channelCheckIntervalHours} hours)...`);
-            startChannelMonitoring(channelCheckIntervalHours);
+            const enableChannelMonitoring = process.env.ENABLE_TELEGRAM_CHANNEL_MONITORING === 'true';
+            if (enableChannelMonitoring) {
+                console.log(`📢 Starting Telegram channel monitoring (every ${channelCheckIntervalHours} hours)...`);
+                startChannelMonitoring(channelCheckIntervalHours);
+            } else {
+                console.log('⏭️ Telegram channel monitoring disabled (ENABLE_TELEGRAM_CHANNEL_MONITORING!=true)');
+            }
         } else {
             console.warn('⏭️ Skipping history cleanup and channel monitoring: database not connected');
         }
@@ -200,7 +205,8 @@ const startServer = async () => {
     
     // Запускаем Telegram бота после запуска сервера (если не отключен)
     const disableBot = process.env.DISABLE_BOT === 'true';
-    if (!disableBot) {
+    const enableBot = process.env.ENABLE_BOT === 'true';
+    if (!disableBot && enableBot) {
         // Даем серверу время на запуск, затем запускаем бота
         setTimeout(() => {
             console.log('🤖 Starting Telegram bot after server initialization...');
@@ -219,7 +225,11 @@ const startServer = async () => {
             }
         }, 3000); // 3 секунды на запуск сервера
     } else {
-        console.log('⏭️ Telegram bot disabled (DISABLE_BOT=true)');
+        if (disableBot) {
+            console.log('⏭️ Telegram bot disabled (DISABLE_BOT=true)');
+        } else {
+            console.log('⏭️ Telegram bot disabled (ENABLE_BOT!=true)');
+        }
     }
 };
 

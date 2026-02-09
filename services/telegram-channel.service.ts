@@ -44,17 +44,8 @@ export async function getChannelInfo(channelUsername: string): Promise<{ id: num
 }
 
 /**
- * Получает новые посты из канала
- * ВАЖНО: Telegram Bot API не позволяет напрямую получать посты из каналов, если бот не является администратором
- * Для публичных каналов можно использовать альтернативные методы:
- * 1. Если бот добавлен в канал как администратор - использовать getUpdates или getChat
- * 2. Использовать MTProto API (требует отдельной библиотеки)
- * 3. Использовать веб-скрапинг Telegram Web (не рекомендуется)
- * 
- * В данной реализации мы используем упрощенный подход:
- * - Пользователь может добавить канал по username
- * - Система будет пытаться получить посты через getUpdates (если бот подписан на канал)
- * - Альтернативно: пользователь может добавлять прямые ссылки на посты
+ * Получает новые посты из канала через веб-скрапинг
+ * Использует Puppeteer для получения последних постов из публичного канала Telegram
  */
 export async function getChannelPosts(
     channelUsername: string,
@@ -65,53 +56,182 @@ export async function getChannelPosts(
         const username = channelUsername.replace('@', '');
         const posts: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
 
-        // Пробуем получить обновления через getUpdates
-        // ВАЖНО: Это работает только если бот подписан на канал и получает обновления
-        const TELEGRAM_API_URL = getTelegramApiUrl();
-        const updatesResponse = await axios.get(`${TELEGRAM_API_URL}/getUpdates`, {
-            params: {
-                timeout: 1,
-                limit: 100
-            }
-        });
+        // Метод 1: Пробуем через Telegram Bot API (если бот подписан на канал)
+        try {
+            const TELEGRAM_API_URL = getTelegramApiUrl();
+            const updatesResponse = await axios.get(`${TELEGRAM_API_URL}/getUpdates`, {
+                params: {
+                    timeout: 1,
+                    limit: 100
+                }
+            });
 
-        if (updatesResponse.data.ok && Array.isArray(updatesResponse.data.result)) {
-            for (const update of updatesResponse.data.result) {
-                if (update.channel_post && update.channel_post.chat) {
-                    const chat = update.channel_post.chat;
-                    const chatUsername = chat.username || '';
-                    
-                    // Проверяем, что это нужный канал
-                    if (chatUsername.toLowerCase() === username.toLowerCase()) {
-                        const messageId = update.channel_post.message_id;
+            if (updatesResponse.data.ok && Array.isArray(updatesResponse.data.result)) {
+                for (const update of updatesResponse.data.result) {
+                    if (update.channel_post && update.channel_post.chat) {
+                        const chat = update.channel_post.chat;
+                        const chatUsername = chat.username || '';
                         
-                        // Пропускаем уже обработанные посты
-                        if (sinceMessageId && messageId <= sinceMessageId) {
-                            continue;
-                        }
+                        if (chatUsername.toLowerCase() === username.toLowerCase()) {
+                            const messageId = update.channel_post.message_id;
+                            
+                            if (sinceMessageId && messageId <= sinceMessageId) {
+                                continue;
+                            }
 
-                        const text = update.channel_post.text || update.channel_post.caption || '';
-                        const date = new Date(update.channel_post.date * 1000);
-                        
-                        // Формируем URL поста
-                        const postUrl = `https://t.me/${username}/${messageId}`;
+                            const text = update.channel_post.text || update.channel_post.caption || '';
+                            const date = new Date(update.channel_post.date * 1000);
+                            const postUrl = `https://t.me/${username}/${messageId}`;
 
-                        posts.push({
-                            messageId,
-                            text,
-                            url: postUrl,
-                            date
-                        });
+                            posts.push({
+                                messageId,
+                                text,
+                                url: postUrl,
+                                date
+                            });
 
-                        if (posts.length >= limit) {
-                            break;
+                            if (posts.length >= limit) {
+                                return posts;
+                            }
                         }
                     }
                 }
             }
+        } catch (apiError: any) {
+            console.log(`ℹ️ [getChannelPosts] Bot API method not available: ${apiError.message}`);
         }
 
-        return posts;
+        // Метод 2: Веб-скрапинг через Puppeteer (для публичных каналов)
+        if (posts.length < limit) {
+            try {
+                console.log(`🌐 [getChannelPosts] Trying web scraping for @${username}...`);
+                const puppeteer = (await import('puppeteer-extra')).default;
+                const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+                puppeteer.use(StealthPlugin());
+
+                const channelUrl = `https://t.me/s/${username}`;
+                
+                const browser = await puppeteer.launch({
+                    headless: true,
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                });
+
+                const page = await browser.newPage();
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                
+                await page.goto(channelUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+                
+                // Ждем загрузки постов
+                await new Promise(resolve => setTimeout(resolve, 4000));
+                
+                // Прокручиваем страницу несколько раз, чтобы подгрузить больше постов (Telegram lazy-load)
+                for (let i = 0; i < 5; i++) {
+                    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+                    await new Promise(resolve => setTimeout(resolve, 2500));
+                }
+
+                // Извлекаем все посты со страницы, затем возьмём последние N (по messageId)
+                const scrapedPosts = await page.evaluate((sinceId) => {
+                    const posts: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
+                    
+                    // Селекторы для постов в Telegram Web
+                    const messageElements = document.querySelectorAll('.tgme_widget_message, [data-post]');
+                    
+                    for (const element of Array.from(messageElements)) {
+                        try {
+                            // Извлекаем message ID из data-post атрибута или из URL
+                            let messageId = 0;
+                            const dataPost = (element as HTMLElement).getAttribute('data-post');
+                            if (dataPost) {
+                                const match = dataPost.match(/\/(\d+)$/);
+                                if (match) {
+                                    messageId = parseInt(match[1], 10);
+                                }
+                            }
+                            
+                            // Если не нашли в data-post, пробуем из URL
+                            if (!messageId) {
+                                const linkEl = element.querySelector('a[href*="/"]');
+                                if (linkEl) {
+                                    const href = linkEl.getAttribute('href') || '';
+                                    const match = href.match(/\/(\d+)$/);
+                                    if (match) {
+                                        messageId = parseInt(match[1], 10);
+                                    }
+                                }
+                            }
+                            
+                            if (!messageId || (sinceId && messageId <= sinceId)) {
+                                continue;
+                            }
+                            
+                            // Извлекаем текст поста (допускаем посты с коротким текстом - медиа, подписи)
+                            const textEl = element.querySelector('.tgme_widget_message_text');
+                            let text = '';
+                            if (textEl) {
+                                const clone = textEl.cloneNode(true) as HTMLElement;
+                                clone.querySelectorAll('a').forEach(a => {
+                                    const linkText = a.textContent;
+                                    if (linkText) {
+                                        a.replaceWith(document.createTextNode(linkText));
+                                    } else {
+                                        a.remove();
+                                    }
+                                });
+                                clone.querySelectorAll('br').forEach(br => br.replaceWith(document.createTextNode('\n')));
+                                text = clone.textContent?.trim() || '';
+                            }
+                            
+                            // Извлекаем дату
+                            const dateEl = element.querySelector('.tgme_widget_message_date time');
+                            let date = new Date();
+                            if (dateEl) {
+                                const datetime = dateEl.getAttribute('datetime');
+                                if (datetime) {
+                                    date = new Date(datetime);
+                                }
+                            }
+                            
+                            if (messageId) {
+                                const postUrl = `https://t.me/${(window.location.pathname.match(/\/s\/([^\/]+)/) || [])[1]}/${messageId}`;
+                                posts.push({
+                                    messageId,
+                                    text,
+                                    url: postUrl,
+                                    date
+                                });
+                            }
+                        } catch (e) {
+                            // Пропускаем проблемные элементы
+                            continue;
+                        }
+                    }
+                    
+                    // Сортируем по messageId (новые первые) и возвращаем все — фильтрация по limit будет снаружи
+                    posts.sort((a, b) => b.messageId - a.messageId);
+                    return posts;
+                }, sinceMessageId || 0);
+
+                await browser.close();
+
+                // Добавляем скрапленные посты (уже отсортированы по messageId desc)
+                for (const post of scrapedPosts) {
+                    if (!posts.find(p => p.messageId === post.messageId)) {
+                        posts.push(post);
+                    }
+                }
+
+                console.log(`✓ [getChannelPosts] Scraped ${scrapedPosts.length} posts from @${username}`);
+            } catch (scrapingError: any) {
+                console.warn(`⚠️ [getChannelPosts] Web scraping failed: ${scrapingError.message}`);
+            }
+        }
+
+        // Сортируем по messageId (по убыванию - самые новые первые)
+        posts.sort((a, b) => b.messageId - a.messageId);
+        
+        // Возвращаем ровно limit последних постов (с наибольшим messageId)
+        return posts.slice(0, limit);
     } catch (error: any) {
         console.error(`❌ [getChannelPosts] Failed to get posts from @${channelUsername}:`, error.message);
         return [];
