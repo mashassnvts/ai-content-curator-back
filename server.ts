@@ -63,7 +63,21 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use(express.json()); // Ensure JSON bodies are parsed
+
+// Увеличиваем лимит размера тела запроса для больших транскриптов
+app.use(express.json({ limit: '10mb' })); // Ensure JSON bodies are parsed
+
+// Обработка закрытых соединений в middleware для парсинга JSON
+app.use((err: any, req: Request, res: Response, next: any) => {
+    if (err.type === 'entity.parse.failed' || err.type === 'request.aborted') {
+        // Игнорируем ошибки парсинга при закрытом соединении
+        if (err.code === 'ECONNABORTED' || err.message?.includes('aborted')) {
+            console.log(`ℹ️ Request body parsing aborted (${req.method} ${req.path})`);
+            return; // Не отправляем ответ, соединение закрыто
+        }
+    }
+    next(err);
+});
 
 // Remove urlencoded parser if it exists, to avoid conflicts
 // app.use(express.urlencoded({ extended: true })); 
@@ -81,12 +95,28 @@ app.get('/', (req: Request, res: Response) => {
 
 // Error handling middleware (must be last)
 app.use((err: any, req: Request, res: Response, next: any) => {
+    // Игнорируем ошибки закрытого соединения (клиент закрыл соединение до завершения запроса)
+    if (err.code === 'ECONNABORTED' || err.code === 'ECONNRESET' || err.message === 'request aborted' || err.type === 'request.aborted') {
+        // Соединение было закрыто клиентом или Railway - это нормально для длительных операций
+        console.log(`ℹ️ Request aborted by client (${req.method} ${req.path}) - connection closed before completion`);
+        // Не отправляем ответ, так как соединение уже закрыто
+        return;
+    }
+    
+    // Проверяем, не закрыто ли уже соединение перед отправкой ответа
+    if (res.headersSent || res.writableEnded) {
+        console.log(`ℹ️ Response already sent, skipping error handler for ${req.method} ${req.path}`);
+        return;
+    }
+    
     console.error('Unhandled error:', err);
-    console.error('Error stack:', err.stack);
+    if (err.stack) {
+        console.error('Error stack:', err.stack);
+    }
     
     // Убеждаемся, что CORS заголовки установлены даже при ошибке
     const origin = req.headers.origin;
-    if (origin && allowedOrigins.includes(origin)) {
+    if (origin && (allowedOrigins.includes(origin) || isVercelOrigin(origin))) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
