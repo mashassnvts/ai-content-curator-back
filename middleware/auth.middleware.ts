@@ -33,13 +33,23 @@ export const authMiddleware = (req: AuthenticatedRequest, res: Response, next: N
         // console.log(`✓ Token verified for user ${decoded.userId}`);
         next();
     } catch (error: any) {
+        // Истекшие токены - это нормальная ситуация, не логируем как ошибку
+        if (error.name === 'TokenExpiredError') {
+            // Логируем только на уровне info, не error
+            if (process.env.LOG_LEVEL === 'debug') {
+                console.log('ℹ️ Token expired (user needs to login again)');
+            }
+            return res.status(400).json({ message: 'Token expired. Please login again.' });
+        }
+        
+        // Для других ошибок логируем как обычно
         console.error('❌ Token verification failed:', error.message);
-        console.error('Token (first 20 chars):', token.substring(0, 20) + '...');
+        if (process.env.LOG_LEVEL === 'debug') {
+            console.error('Token (first 20 chars):', token.substring(0, 20) + '...');
+        }
         
         let errorMessage = 'Invalid token.';
-        if (error.name === 'TokenExpiredError') {
-            errorMessage = 'Token expired. Please login again.';
-        } else if (error.name === 'JsonWebTokenError') {
+        if (error.name === 'JsonWebTokenError') {
             errorMessage = 'Invalid token format.';
         }
         

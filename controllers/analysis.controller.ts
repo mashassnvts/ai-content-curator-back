@@ -910,7 +910,27 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             score: r.score
         })));
 
-        return res.status(200).json(results);
+        // Проверяем, не закрыто ли соединение перед отправкой ответа
+        if (res.headersSent) {
+            console.warn('⚠️ Response headers already sent, skipping response');
+            return res;
+        }
+        
+        if (res.writableEnded || res.destroyed) {
+            console.warn('⚠️ Response stream already ended or destroyed, cannot send response');
+            return res;
+        }
+        
+        // Отправляем ответ немедленно после завершения анализа
+        try {
+            res.status(200).json(results);
+            console.log('✅ Response sent successfully');
+        } catch (sendError: any) {
+            console.error('❌ Failed to send response:', sendError.message);
+            // Если не удалось отправить, просто логируем ошибку
+        }
+        
+        return res;
 
     } catch (error) {
         console.error('❌ Error in handleAnalysisRequest:', error);
