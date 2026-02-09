@@ -13,7 +13,33 @@ puppeteer.use(StealthPlugin());
 puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
 
 class ContentService {
-    // ... в классе ContentService ...
+    private _ytDlpCookiesPath: string | null = null;
+
+    /**
+     * Возвращает опции cookies для yt-dlp, если настроены.
+     * Поддерживает YT_DLP_COOKIES_FILE (путь к файлу) или YT_DLP_COOKIES (base64-содержимое Netscape).
+     */
+    private getYtDlpCookiesOptions(): { cookies?: string } {
+        const cookiesFile = process.env.YT_DLP_COOKIES_FILE;
+        if (cookiesFile && fs.pathExistsSync(cookiesFile)) {
+            return { cookies: cookiesFile };
+        }
+        const cookiesB64 = process.env.YT_DLP_COOKIES;
+        if (cookiesB64) {
+            if (!this._ytDlpCookiesPath) {
+                try {
+                    const cookiesContent = Buffer.from(cookiesB64, 'base64').toString('utf-8');
+                    this._ytDlpCookiesPath = path.join(os.tmpdir(), 'yt-dlp-cookies.txt');
+                    fs.writeFileSync(this._ytDlpCookiesPath, cookiesContent);
+                } catch (e) {
+                    console.warn('⚠️ Failed to init yt-dlp cookies from YT_DLP_COOKIES:', (e as Error).message);
+                    return {};
+                }
+            }
+            return { cookies: this._ytDlpCookiesPath };
+        }
+        return {};
+    }
 
     async extractContentFromUrl(url: string): Promise<ExtractedContent> {
         // Определяем тип URL
@@ -204,7 +230,20 @@ class ContentService {
                 console.log(`⚠️ ScrapingBee metadata extraction failed: ${scrapingBeeError.message}`);
             }
             
-            // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // 5. FALLBACK: YouTube Data API v3 (для YouTube, не требует Puppeteer/cookies)
+            if (videoPlatform === 'youtube') {
+                try {
+                    const youtubeApiMetadata = await this.fetchMetadataWithYouTubeAPI(url);
+                    if (youtubeApiMetadata && youtubeApiMetadata.content && youtubeApiMetadata.content.trim().length > 100) {
+                        console.log(`✓ Using YouTube Data API v3 metadata`);
+                        return youtubeApiMetadata;
+                    }
+                } catch (error: any) {
+                    console.warn(`⚠️ YouTube API metadata extraction failed: ${error.message}`);
+                }
+            }
+
+            // 6. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
             try {
                 const metadata = await this.extractVideoMetadata(url, videoPlatform);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
@@ -212,10 +251,15 @@ class ContentService {
                     return metadata;
                 }
             } catch (error: any) {
-                console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${error.message}`);
+                const errorMsg = error.message || 'Unknown error';
+                if (errorMsg.includes('Target crashed') || errorMsg.includes('Protocol error') || errorMsg.includes('Browser crashed')) {
+                    console.warn(`⚠️ Puppeteer unavailable (browser crashed) for ${videoPlatform}`);
+                } else {
+                    console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${errorMsg}`);
+                }
             }
 
-            // 6. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
+            // 7. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
             if (videoPlatform === 'youtube') {
                 try {
                     const videoInfo = await play.video_info(url);
@@ -228,7 +272,7 @@ class ContentService {
                 }
             }
             
-            // 7. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
+            // 8. ФИНАЛЬНЫЙ FALLBACK: Извлечение базовых метаданных через простой HTTP-запрос
             // Это гарантирует, что мы всегда получим хотя бы название и описание из og:tags
             try {
                 console.log(`🔄 Attempting final fallback: extracting basic metadata from page...`);
@@ -368,10 +412,46 @@ class ContentService {
                     '--disable-setuid-sandbox',
                     '--lang=ru-RU,ru',
                     '--disable-features=TranslateUI',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                ...additionalArgs
-                ]
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-background-networking',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-breakpad',
+                    '--disable-client-side-phishing-detection',
+                    '--disable-default-apps',
+                    '--disable-domain-reliability',
+                    '--disable-features=AudioServiceOutOfProcess',
+                    '--disable-hang-monitor',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-notifications',
+                    '--disable-offer-store-unmasked-wallet-cards',
+                    '--disable-popup-blocking',
+                    '--disable-print-preview',
+                    '--disable-prompt-on-repost',
+                    '--disable-renderer-backgrounding',
+                    '--disable-speech-api',
+                    '--disable-sync',
+                    '--disable-web-resources',
+                    '--hide-scrollbars',
+                    '--ignore-gpu-blacklist',
+                    '--metrics-recording-only',
+                    '--mute-audio',
+                    '--no-first-run',
+                    '--no-default-browser-check',
+                    '--no-pings',
+                    '--no-zygote',
+                    '--single-process', // Важно для Railway - один процесс уменьшает потребление памяти
+                    '--disable-ipc-flooding-protection',
+                    ...additionalArgs
+                ],
+                protocolTimeout: 120000, // 2 минуты для protocol timeout
+                ignoreHTTPSErrors: true,
+                handleSIGINT: false,
+                handleSIGTERM: false,
+                handleSIGHUP: false
             };
         
             // Используем системный Chromium, если указан путь
@@ -1094,15 +1174,23 @@ class ContentService {
             console.log('Launching browser to extract YouTube transcript...');
             
             const launchOptions = await this.getPuppeteerLaunchOptions();
-            launchOptions.protocolTimeout = 120000; // 2 минуты для protocol timeout
             
             // Добавляем таймаут на запуск браузера (30 секунд)
-            browser = await Promise.race([
-                puppeteer.launch(launchOptions),
-                new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Browser launch timeout')), 30000)
-                )
-            ]) as any;
+            try {
+                browser = await Promise.race([
+                    puppeteer.launch(launchOptions),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Browser launch timeout')), 30000)
+                    )
+                ]) as any;
+            } catch (launchError: any) {
+                const errorMsg = launchError.message || 'Unknown error';
+                if (errorMsg.includes('Target crashed') || errorMsg.includes('Protocol error')) {
+                    console.warn(`⚠️ Browser crashed during launch: ${errorMsg}. Puppeteer unavailable on this server.`);
+                    throw new Error('Browser crashed - Puppeteer unavailable');
+                }
+                throw launchError;
+            }
     
             const page = await browser.newPage();
             
@@ -1262,11 +1350,20 @@ class ContentService {
 
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.error(`✗ Failed to extract YouTube transcript: ${errorMessage}`);
+            if (errorMessage.includes('Target crashed') || errorMessage.includes('Protocol error') || errorMessage.includes('Browser crashed')) {
+                console.warn(`⚠️ Browser crashed - Puppeteer unavailable. Error: ${errorMessage}`);
+            } else {
+                console.error(`✗ Failed to extract YouTube transcript: ${errorMessage}`);
+            }
             return '';
         } finally {
             if (browser) {
-                await browser.close();
+                try {
+                    await browser.close();
+                } catch (closeError: any) {
+                    // Игнорируем ошибки закрытия браузера
+                    console.warn(`⚠️ Error closing browser: ${closeError.message}`);
+                }
             }
         }
     }
@@ -1363,8 +1460,10 @@ class ContentService {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
             
+            const cookiesOpts = this.getYtDlpCookiesOptions();
             // Сначала получаем информацию о доступных субтитрах
             const infoResult = await ytdlp(url, {
+                ...cookiesOpts,
                 listSubs: true,
                 skipDownload: true,
                 quiet: true,
@@ -1379,6 +1478,7 @@ class ContentService {
             try {
                 // Пробуем скачать автоматические субтитры (если доступны)
                 await ytdlp(url, {
+                    ...cookiesOpts,
                     writeAutoSub: true,
                     subLang: 'ru,en,uk', // Приоритет языков
                     skipDownload: true,
@@ -1424,6 +1524,7 @@ class ContentService {
                 // Если автоматические субтитры недоступны, пробуем обычные
                 try {
                     await ytdlp(url, {
+                        ...cookiesOpts,
                         writeSub: true,
                         subLang: 'ru,en,uk',
                         skipDownload: true,
@@ -1473,6 +1574,67 @@ class ContentService {
     }
 
     /**
+     * Получает метаданные YouTube видео через YouTube Data API v3 (не требует cookies/Puppeteer)
+     */
+    private async fetchMetadataWithYouTubeAPI(url: string): Promise<ExtractedContent | null> {
+        const apiKey = process.env.YOUTUBE_API_KEY;
+        if (!apiKey || apiKey === 'your_youtube_api_key_here') {
+            return null;
+        }
+
+        try {
+            // Извлекаем video ID из URL
+            const videoIdMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/);
+            if (!videoIdMatch || !videoIdMatch[1]) {
+                return null;
+            }
+            const videoId = videoIdMatch[1];
+
+            const apiUrl = `https://www.googleapis.com/youtube/v3/videos?part=snippet&id=${videoId}&key=${apiKey}`;
+            const response = await fetch(apiUrl, {
+                signal: AbortSignal.timeout(10000) // 10 секунд таймаут
+            });
+
+            if (!response.ok) {
+                if (response.status === 403) {
+                    console.warn('⚠️ YouTube API quota exceeded or invalid API key');
+                }
+                return null;
+            }
+
+            const data = await response.json();
+            if (!data.items || data.items.length === 0) {
+                return null;
+            }
+
+            const snippet = data.items[0].snippet;
+            const title = snippet?.title || '';
+            const description = snippet?.description || '';
+
+            if (!title && !description) {
+                return null;
+            }
+
+            const contentParts: string[] = [];
+            if (title) contentParts.push(`Название: ${title}`);
+            if (description) contentParts.push(`\n\nОписание: ${description}`);
+
+            const content = contentParts.join('') + 
+                '\n\n⚠️ ВАЖНО: Это только метаданные видео (название и описание) через YouTube API. Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных.';
+
+            console.log('✓ Extracted metadata via YouTube Data API v3');
+            return { content, sourceType: 'metadata' };
+        } catch (error: any) {
+            if (error.name === 'AbortError') {
+                console.warn('⚠️ YouTube API request timed out');
+            } else {
+                console.warn(`⚠️ YouTube API metadata extraction failed: ${error.message}`);
+            }
+            return null;
+        }
+    }
+
+    /**
      * Быстро получает метаданные видео через yt-dlp (без Puppeteer)
      */
     private async fetchMetadataWithYtDlp(url: string): Promise<ExtractedContent | null> {
@@ -1480,6 +1642,7 @@ class ContentService {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
             const rawResult = await ytdlp(url, {
+                ...this.getYtDlpCookiesOptions(),
                 dumpSingleJson: true,
                 noWarnings: true,
                 simulate: true,
@@ -1622,7 +1785,16 @@ class ContentService {
         try {
             console.log(`Extracting metadata from ${platform} video: ${url}`);
             const launchOptions = await this.getPuppeteerLaunchOptions();
-            browser = await puppeteer.launch(launchOptions);
+            try {
+                browser = await puppeteer.launch(launchOptions);
+            } catch (launchError: any) {
+                const errorMsg = launchError.message || 'Unknown error';
+                if (errorMsg.includes('Target crashed') || errorMsg.includes('Protocol error')) {
+                    console.warn(`⚠️ Browser crashed during launch for ${platform}: ${errorMsg}. Puppeteer unavailable.`);
+                    return null;
+                }
+                throw launchError;
+            }
             const page = await browser.newPage();
             
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -1940,11 +2112,19 @@ class ContentService {
             return null;
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.error(`✗ Failed to extract metadata from ${platform}: ${errorMessage}`);
+            if (errorMessage.includes('Target crashed') || errorMessage.includes('Protocol error') || errorMessage.includes('Browser crashed')) {
+                console.warn(`⚠️ Browser crashed - Puppeteer unavailable for ${platform}`);
+            } else {
+                console.error(`✗ Failed to extract metadata from ${platform}: ${errorMessage}`);
+            }
             return null;
         } finally {
             if (browser) {
-                await browser.close();
+                try {
+                    await browser.close();
+                } catch (closeError: any) {
+                    console.warn(`⚠️ Error closing browser: ${closeError.message}`);
+                }
             }
         }
     }
@@ -2011,7 +2191,16 @@ class ContentService {
         try {
             console.log(`Extracting basic metadata via Puppeteer from: ${url}`);
             const launchOptions = await this.getPuppeteerLaunchOptions();
-            browser = await puppeteer.launch(launchOptions);
+            try {
+                browser = await puppeteer.launch(launchOptions);
+            } catch (launchError: any) {
+                const errorMsg = launchError.message || 'Unknown error';
+                if (errorMsg.includes('Target crashed') || errorMsg.includes('Protocol error')) {
+                    console.warn(`⚠️ Browser crashed during launch: ${errorMsg}. Puppeteer unavailable.`);
+                    return null;
+                }
+                throw launchError;
+            }
             const page = await browser.newPage();
             
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
@@ -2052,11 +2241,19 @@ class ContentService {
             return null;
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.warn(`⚠️ Puppeteer metadata extraction failed: ${errorMessage}`);
+            if (errorMessage.includes('Target crashed') || errorMessage.includes('Protocol error') || errorMessage.includes('Browser crashed')) {
+                console.warn(`⚠️ Browser crashed - Puppeteer unavailable for basic metadata`);
+            } else {
+                console.warn(`⚠️ Puppeteer metadata extraction failed: ${errorMessage}`);
+            }
             return null;
         } finally {
             if (browser) {
-                await browser.close();
+                try {
+                    await browser.close();
+                } catch (closeError: any) {
+                    console.warn(`⚠️ Error closing browser: ${closeError.message}`);
+                }
             }
         }
     }
@@ -2285,6 +2482,7 @@ class ContentService {
 
             // Специальные опции для VK и других платформ, которые могут требовать авторизацию
             const options: any = {
+                ...this.getYtDlpCookiesOptions(),
                 output: normalizedOutput,
                 format: 'bestvideo*+bestaudio/best',
                 mergeOutputFormat: 'mp4',
