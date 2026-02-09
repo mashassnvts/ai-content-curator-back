@@ -363,7 +363,7 @@ class ContentService {
                     '--disable-ipc-flooding-protection',
                     ...additionalArgs
                 ],
-                protocolTimeout: 120000, // 2 минуты для protocol timeout
+                protocolTimeout: 300000, // 5 минут — Railway требует больше времени для CDP
                 ignoreHTTPSErrors: true,
                 handleSIGINT: false,
                 handleSIGTERM: false,
