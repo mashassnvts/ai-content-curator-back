@@ -659,9 +659,16 @@ export const processSingleUrlAnalysis = async (
 };
 
 const handleAnalysisRequest = async (req: Request, res: Response): Promise<Response> => {
+    // Проверяем, не закрыто ли соединение в начале запроса
+    if (res.writableEnded || res.destroyed || !res.writable) {
+        console.warn('⚠️ Connection already closed at request start');
+        return res;
+    }
+    
     // Устанавливаем заголовки для поддержания соединения активным (только один раз, до отправки ответа)
     if (!res.headersSent) {
         res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no'); // Отключаем буферизацию для Railway
     }
     
     try {
@@ -916,18 +923,41 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             return res;
         }
         
-        if (res.writableEnded || res.destroyed) {
+        if (res.writableEnded || res.destroyed || !res.writable) {
             console.warn('⚠️ Response stream already ended or destroyed, cannot send response');
             return res;
         }
         
         // Отправляем ответ немедленно после завершения анализа
         try {
+            // Финальная проверка соединения перед отправкой
+            if (res.writableEnded || res.destroyed || !res.writable) {
+                console.warn('⚠️ Connection closed before sending response body (final check)');
+                return res;
+            }
+            
+            // Отправляем заголовки сразу, чтобы Railway не закрыл соединение
+            if (!res.headersSent) {
+                res.setHeader('Content-Type', 'application/json');
+                res.setHeader('Connection', 'keep-alive');
+                res.setHeader('X-Accel-Buffering', 'no');
+            }
+            
+            // Еще одна проверка после установки заголовков
+            if (res.writableEnded || res.destroyed || !res.writable) {
+                console.warn('⚠️ Connection closed after setting headers');
+                return res;
+            }
+            
             res.status(200).json(results);
             console.log('✅ Response sent successfully');
         } catch (sendError: any) {
-            console.error('❌ Failed to send response:', sendError.message);
-            // Если не удалось отправить, просто логируем ошибку
+            // Обрабатываем ошибки отправки (например, ECONNRESET, EPIPE)
+            if (sendError.code === 'ECONNRESET' || sendError.code === 'EPIPE' || sendError.message?.includes('write after end')) {
+                console.warn('⚠️ Connection closed during response send:', sendError.code);
+            } else {
+                console.error('❌ Failed to send response:', sendError.message);
+            }
         }
         
         return res;
