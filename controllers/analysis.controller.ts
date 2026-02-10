@@ -328,6 +328,8 @@ export const processSingleUrlAnalysis = async (
         // Логируем тип источника для диагностики
         if (sourceType === 'transcript') {
             console.log(`✅ Using FULL VIDEO TRANSCRIPT for analysis (${content.length} chars)`);
+        } else if (sourceType === 'telegram') {
+            console.log(`✅ Using FULL TELEGRAM POST CONTENT for analysis (${content.length} chars)`);
         } else if (sourceType === 'metadata') {
             console.log(`⚠️ Using METADATA ONLY for analysis (${content.length} chars) - NOT full video content`);
         }
