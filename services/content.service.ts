@@ -40,6 +40,12 @@ class ContentService {
     }
 
     async extractContentFromUrl(url: string): Promise<ExtractedContent> {
+        // Проверяем, является ли это Telegram постом
+        const telegramPostMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)\/(\d+)$/);
+        if (telegramPostMatch) {
+            return await this.extractTelegramPostContent(url);
+        }
+        
         // Определяем тип URL
         const videoPlatform = this.detectVideoPlatform(url);
         
@@ -1568,6 +1574,129 @@ class ContentService {
         } catch (error: any) {
             console.warn(`yt-dlp metadata extraction failed: ${error.message}`);
             return null;
+        }
+    }
+
+    /**
+     * Извлекает контент из Telegram поста
+     */
+    private async extractTelegramPostContent(url: string): Promise<ExtractedContent> {
+        try {
+            console.log(`📱 [Telegram] Extracting post content from: ${url}`);
+            
+            // Пробуем извлечь через Puppeteer (самый надежный способ для Telegram)
+            try {
+                const launchOptions = await this.getPuppeteerLaunchOptions();
+                try {
+                    const browser = await puppeteer.launch(launchOptions);
+                    const page = await browser.newPage();
+                    
+                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    
+                    // Ждем загрузки контента
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    
+                    // Извлекаем текст поста из Telegram
+                    const postContent = await page.evaluate(() => {
+                        // Ищем основной текст поста
+                        const selectors = [
+                            '.tgme_widget_message_text',
+                            '.message-text',
+                            '[class*="message_text"]',
+                            'article .text',
+                            '.tgme_widget_message_bubble'
+                        ];
+                        
+                        for (const selector of selectors) {
+                            const element = document.querySelector(selector);
+                            if (element) {
+                                return element.textContent?.trim() || '';
+                            }
+                        }
+                        
+                        // Fallback: ищем любой текст в article или main
+                        const article = document.querySelector('article, main, .tgme_widget_message');
+                        if (article) {
+                            // Удаляем ненужные элементы
+                            article.querySelectorAll('script, style, nav, header, footer, aside, button, .tgme_widget_message_date, .tgme_widget_message_views').forEach(el => el.remove());
+                            return article.textContent?.trim() || '';
+                        }
+                        
+                        return '';
+                    });
+                    
+                    await browser.close();
+                    
+                    if (postContent && postContent.trim().length > 30) {
+                        console.log(`✓ Extracted Telegram post content via Puppeteer (${postContent.length} chars)`);
+                        return { content: postContent, sourceType: 'telegram' };
+                    }
+                } catch (launchError: any) {
+                    if (launchError.message?.includes('Target crashed') || launchError.message?.includes('Protocol error')) {
+                        console.warn(`⚠️ Puppeteer unavailable for Telegram post, trying HTTP fallback...`);
+                    } else {
+                        throw launchError;
+                    }
+                }
+            } catch (puppeteerError: any) {
+                console.warn(`⚠️ Puppeteer failed for Telegram post: ${puppeteerError.message}`);
+            }
+            
+            // Fallback: извлекаем через HTTP запрос (og:description может содержать полный текст)
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                    },
+                    signal: AbortSignal.timeout(10000)
+                });
+                
+                const html = await response.text();
+                const cheerio = await import('cheerio');
+                const $ = cheerio.load(html);
+                
+                // Извлекаем og:description (Telegram часто помещает весь текст поста туда)
+                const ogDescription = $('meta[property="og:description"]').attr('content') || '';
+                const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+                
+                // Если og:description достаточно длинный (>100 символов), считаем это полным текстом поста
+                if (ogDescription && ogDescription.trim().length > 100) {
+                    const content = ogTitle ? `${ogTitle}\n\n${ogDescription}` : ogDescription;
+                    console.log(`✓ Extracted Telegram post content from og:description (${content.length} chars)`);
+                    return { content, sourceType: 'telegram' };
+                }
+                
+                // Если og:description короткий, пробуем найти текст в HTML
+                const messageText = $('.tgme_widget_message_text, .message-text, [class*="message_text"]').text().trim();
+                if (messageText && messageText.length > 30) {
+                    console.log(`✓ Extracted Telegram post content from HTML (${messageText.length} chars)`);
+                    return { content: messageText, sourceType: 'telegram' };
+                }
+                
+                // Если ничего не нашли, используем og:description как есть
+                if (ogDescription && ogDescription.trim().length > 30) {
+                    const content = ogTitle ? `${ogTitle}\n\n${ogDescription}` : ogDescription;
+                    console.log(`✓ Using og:description as Telegram post content (${content.length} chars)`);
+                    return { content, sourceType: 'telegram' };
+                }
+            } catch (httpError: any) {
+                console.warn(`⚠️ HTTP extraction failed for Telegram post: ${httpError.message}`);
+            }
+            
+            // Если ничего не получилось, возвращаем минимальную информацию
+            console.warn(`⚠️ Failed to extract Telegram post content`);
+            return {
+                content: `⚠️ Не удалось извлечь полный текст Telegram поста.\n\nURL: ${url}`,
+                sourceType: 'telegram' as const
+            };
+        } catch (error: any) {
+            console.error(`✗ Failed to extract Telegram post: ${error.message}`);
+            return {
+                content: `⚠️ Ошибка при извлечении Telegram поста: ${error.message}\n\nURL: ${url}`,
+                sourceType: 'telegram' as const
+            };
         }
     }
 
