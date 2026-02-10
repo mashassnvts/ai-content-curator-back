@@ -793,8 +793,122 @@ ${feedbackContext}${ragContext}
             // Удаляем лишние запятые перед закрывающими скобками
             fixedResponse = fixedResponse.replace(/,(\s*[}\]])/g, '$1');
             
-            // Удаляем неэкранированные переносы строк внутри строковых значений
-            fixedResponse = fixedResponse.replace(/("(?:[^"\\]|\\.)*")\s*\n\s*/g, '$1 ');
+            // ИСПРАВЛЕНИЕ: Надежное экранирование управляющих символов в JSON строках
+            // Используем пошаговый парсинг для правильной обработки всех строковых значений
+            try {
+                // Метод 1: Исправляем управляющие символы через посимвольный парсинг JSON структуры
+                let result = '';
+                let inString = false;
+                let escapeNext = false;
+                let stringStart = -1;
+                
+                for (let i = 0; i < fixedResponse.length; i++) {
+                    const char = fixedResponse[i];
+                    const code = char.charCodeAt(0);
+                    
+                    if (escapeNext) {
+                        // Предыдущий символ был обратным слэшем - пропускаем экранирование
+                        result += char;
+                        escapeNext = false;
+                        continue;
+                    }
+                    
+                    if (char === '\\') {
+                        escapeNext = true;
+                        result += char;
+                        continue;
+                    }
+                    
+                    if (char === '"' && (i === 0 || fixedResponse[i - 1] !== '\\')) {
+                        // Начало или конец строки
+                        if (!inString) {
+                            inString = true;
+                            stringStart = result.length;
+                        } else {
+                            inString = false;
+                            stringStart = -1;
+                        }
+                        result += char;
+                        continue;
+                    }
+                    
+                    if (inString) {
+                        // Мы внутри строкового значения - проверяем управляющие символы
+                        if (code >= 0x00 && code <= 0x1F) {
+                            // Управляющий символ - экранируем его
+                            if (code === 0x0A) { // \n
+                                result += '\\n';
+                            } else if (code === 0x0D) { // \r
+                                result += '\\r';
+                            } else if (code === 0x09) { // \t
+                                result += '\\t';
+                            } else if (code === 0x08) { // \b
+                                result += '\\b';
+                            } else if (code === 0x0C) { // \f
+                                result += '\\f';
+                            } else {
+                                // Другие управляющие символы - экранируем как \uXXXX
+                                result += `\\u${code.toString(16).padStart(4, '0')}`;
+                            }
+                        } else {
+                            result += char;
+                        }
+                    } else {
+                        result += char;
+                    }
+                }
+                
+                fixedResponse = result;
+            } catch (parseError) {
+                // Если посимвольный парсинг не сработал, пробуем regex метод
+                console.warn('⚠️ Character-by-character parsing failed, trying regex method...');
+                
+                // Метод 2: Regex для исправления управляющих символов в строках
+                // Используем более точный regex, который учитывает экранированные символы
+                fixedResponse = fixedResponse.replace(/"((?:[^"\\]|\\.)*)"/g, (match, content) => {
+                    // Проверяем наличие неэкранированных управляющих символов
+                    let fixedContent = '';
+                    let escapeNext = false;
+                    
+                    for (let i = 0; i < content.length; i++) {
+                        const char = content[i];
+                        const code = char.charCodeAt(0);
+                        
+                        if (escapeNext) {
+                            fixedContent += char;
+                            escapeNext = false;
+                            continue;
+                        }
+                        
+                        if (char === '\\') {
+                            escapeNext = true;
+                            fixedContent += char;
+                            continue;
+                        }
+                        
+                        // Если это управляющий символ и не экранирован
+                        if (code >= 0x00 && code <= 0x1F) {
+                            if (code === 0x0A) {
+                                fixedContent += '\\n';
+                            } else if (code === 0x0D) {
+                                fixedContent += '\\r';
+                            } else if (code === 0x09) {
+                                fixedContent += '\\t';
+                            } else if (code === 0x08) {
+                                fixedContent += '\\b';
+                            } else if (code === 0x0C) {
+                                fixedContent += '\\f';
+                            } else {
+                                fixedContent += `\\u${code.toString(16).padStart(4, '0')}`;
+                            }
+                        } else {
+                            fixedContent += char;
+                        }
+                    }
+                    
+                    return `"${fixedContent}"`;
+                });
+            }
             
             // Пытаемся найти и исправить неэкранированные кавычки в строках
             // Заменяем одиночные кавычки внутри строк на экранированные
