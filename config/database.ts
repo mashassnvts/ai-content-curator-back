@@ -26,6 +26,13 @@ console.log(`[DB Config] Parsed - database: ${database}, host: ${host}, port: ${
 const sequelize = new Sequelize(dbUri, {
     dialect: 'postgres',
     logging: false,
+    // Увеличиваем таймауты подключения для Railway/Neon
+    pool: {
+        max: 5,
+        min: 0,
+        acquire: 60000, // 60 секунд на установку соединения
+        idle: 10000, // 10 секунд простоя перед закрытием
+    },
     // Явно указываем, что не нужно использовать имя пользователя как имя БД
     dialectOptions: {
         // SSL для Render PostgreSQL и других облачных провайдеров
@@ -35,6 +42,8 @@ const sequelize = new Sequelize(dbUri, {
                 rejectUnauthorized: false // Для Render PostgreSQL
             }
             : false,
+        // Увеличиваем таймаут подключения для pg библиотеки
+        connectTimeout: 30000, // 30 секунд
     },
 });
 
