@@ -68,7 +68,7 @@ class ContentService {
                     const transcriptText = await Promise.race([
                         this.getYouTubeTranscript(url),
                         new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 120000) // Увеличено до 2 минут
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
                         )
                     ]);
                     
@@ -420,8 +420,7 @@ class ContentService {
                 '--disable-dev-shm-usage',
                 '--disable-gpu',
                 ...additionalArgs
-                ],
-                protocolTimeout: 300000 // 5 минут для Railway (увеличено с 300000)
+                ]
             };
         
             // Используем системный Chromium, если указан путь
@@ -1149,13 +1148,13 @@ class ContentService {
             console.log('Launching browser to extract YouTube transcript...');
             
             const launchOptions = await this.getPuppeteerLaunchOptions();
-            // protocolTimeout уже установлен в getPuppeteerLaunchOptions (5 минут)
+            launchOptions.protocolTimeout = 120000; // 2 минуты для protocol timeout
             
-            // Добавляем таймаут на запуск браузера (1 минута)
+            // Добавляем таймаут на запуск браузера (30 секунд)
             browser = await Promise.race([
                 puppeteer.launch(launchOptions),
                 new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Browser launch timeout')), 60000) // Увеличено до 1 минуты
+                    setTimeout(() => reject(new Error('Browser launch timeout')), 30000)
                 )
             ]) as any;
     
@@ -1170,7 +1169,7 @@ class ContentService {
             console.log(`Navigating to YouTube video: ${url}`);
             await page.goto(url, { 
                 waitUntil: 'domcontentloaded', // Изменено с networkidle2 на domcontentloaded для быстрой загрузки
-                timeout: 120000 // Увеличено до 2 минут для Railway
+                timeout: 90000 // Увеличено до 90 секунд
             });
 
             // Ждем полной загрузки страницы
