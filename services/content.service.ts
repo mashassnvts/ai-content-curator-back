@@ -13,7 +13,31 @@ puppeteer.use(StealthPlugin());
 puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
 
 class ContentService {
-    // ... в классе ContentService ...
+    /**
+     * Нормализует транскрипт видео: удаляет временные метки, лишние пробелы, специальные символы
+     */
+    private normalizeTranscript(transcript: string): string {
+        if (!transcript || transcript.trim().length === 0) {
+            return '';
+        }
+        
+        return transcript
+            // Удаляем временные метки в форматах [00:00], (00:00), 00:00:00, 00:00
+            .replace(/\[?\d{1,2}:\d{2}(?::\d{2})?\]?/g, '')
+            .replace(/\(?\d{1,2}:\d{2}(?::\d{2})?\)?/g, '')
+            // Удаляем специальные символы (›, », «)
+            .replace(/[›»«]/g, '')
+            // Удаляем множественные пробелы
+            .replace(/\s+/g, ' ')
+            // Нормализуем переносы строк (убираем множественные)
+            .replace(/\n{3,}/g, '\n\n')
+            // Убираем пробелы в начале и конце строк
+            .split('\n')
+            .map(line => line.trim())
+            .filter(line => line.length > 0)
+            .join(' ')
+            .trim();
+    }
 
     async extractContentFromUrl(url: string): Promise<ExtractedContent> {
         // Определяем тип URL
@@ -42,9 +66,12 @@ class ContentService {
                         )
                     ]);
                     
-                    if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${transcriptText.length} chars)`);
-                        return { content: transcriptText, sourceType: 'transcript' };
+                    if (transcriptText && transcriptText.trim().length > 30) {
+                        const normalized = this.normalizeTranscript(transcriptText);
+                        if (normalized.length > 30) {
+                            console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${normalized.length} chars)`);
+                            return { content: normalized, sourceType: 'transcript' };
+                        }
                     }
                 } catch (puppeteerError: any) {
                     const errorMsg = puppeteerError.message || 'Unknown error';
@@ -61,9 +88,12 @@ class ContentService {
                         const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
                         const transcriptText = transcriptItems.map(item => item.text).join(' ');
                         
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
+                        if (transcriptText && transcriptText.trim().length > 30) {
+                            const normalized = this.normalizeTranscript(transcriptText);
+                            if (normalized.length > 30) {
+                                console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${normalized.length} chars)`);
+                                return { content: normalized, sourceType: 'transcript' };
+                            }
                         }
                     } catch (autoError: any) {
                         // Если автоматический выбор не сработал, пробуем с конкретными языками
@@ -74,9 +104,12 @@ class ContentService {
                                 const transcriptItems = await YoutubeTranscript.fetchTranscript(url, { lang });
                                 const transcriptText = transcriptItems.map(item => item.text).join(' ');
                                 
-                                if (transcriptText && transcriptText.trim().length > 50) {
-                                    console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${lang}, ${transcriptText.length} chars)`);
-                                    return { content: transcriptText, sourceType: 'transcript' };
+                                if (transcriptText && transcriptText.trim().length > 30) {
+                                    const normalized = this.normalizeTranscript(transcriptText);
+                                    if (normalized.length > 30) {
+                                        console.log(`✓✓✓ SUCCESS: Using youtube-transcript library (${lang}, ${normalized.length} chars)`);
+                                        return { content: normalized, sourceType: 'transcript' };
+                                    }
                                 }
                             } catch (langError: any) {
                                 // Пробуем следующий язык
@@ -101,9 +134,12 @@ class ContentService {
                     if (scrapingBeeContent) {
                         console.log(`   ✓ ScrapingBee returned HTML (${scrapingBeeContent.length} chars)`);
                         const transcriptText = await this.extractTranscriptFromHTML(scrapingBeeContent, url);
-                        if (transcriptText && transcriptText.trim().length > 50) {
-                            console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${transcriptText.length} chars)`);
-                            return { content: transcriptText, sourceType: 'transcript' };
+                        if (transcriptText && transcriptText.trim().length > 30) {
+                            const normalized = this.normalizeTranscript(transcriptText);
+                            if (normalized.length > 30) {
+                                console.log(`✓✓✓ SUCCESS: Using ScrapingBee for YouTube transcript (${normalized.length} chars)`);
+                                return { content: normalized, sourceType: 'transcript' };
+                            }
                         }
                     }
                 } catch (scrapingBeeError: any) {
@@ -114,9 +150,12 @@ class ContentService {
                 try {
                     console.log('   [4/4] Trying yt-dlp for transcript extraction...');
                     const transcriptText = await this.extractTranscriptWithYtDlp(url);
-                    if (transcriptText && transcriptText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${transcriptText.length} chars)`);
-                        return { content: transcriptText, sourceType: 'transcript' };
+                    if (transcriptText && transcriptText.trim().length > 30) {
+                        const normalized = this.normalizeTranscript(transcriptText);
+                        if (normalized.length > 30) {
+                            console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${normalized.length} chars)`);
+                            return { content: normalized, sourceType: 'transcript' };
+                        }
                     }
                 } catch (ytDlpError: any) {
                     const errorMsg = ytDlpError.message || 'Unknown error';
@@ -124,6 +163,7 @@ class ContentService {
                 }
                 
                 // Все методы получения транскрипта провалились
+                console.log('⚠️⚠️⚠️ ALL TRANSCRIPT METHODS FAILED ⚠️⚠️⚠️');
                 console.log('❌ All transcript extraction methods failed for YouTube. Proceeding to metadata fallback...');
             }
 
@@ -135,9 +175,12 @@ class ContentService {
                 console.log(`🎬 [${videoPlatform}] Attempting automatic transcription to get full video content...`);
                 try {
                     const transcribedText = await this.transcribeVideo(url, videoPlatform);
-                    if (transcribedText && transcribedText.trim().length > 50) {
-                        console.log(`✓✓✓ SUCCESS: Using automatic transcription (${transcribedText.length} chars) - full video content extracted`);
-                        return { content: transcribedText, sourceType: 'transcript' };
+                    if (transcribedText && transcribedText.trim().length > 30) {
+                        const normalized = this.normalizeTranscript(transcribedText);
+                        if (normalized.length > 30) {
+                            console.log(`✓✓✓ SUCCESS: Using automatic transcription (${normalized.length} chars) - full video content extracted`);
+                            return { content: normalized, sourceType: 'transcript' };
+                        }
                     } else {
                         console.warn(`⚠️ Transcription returned empty or too short text (${transcribedText?.length || 0} chars)`);
                     }
@@ -731,9 +774,12 @@ class ContentService {
                                                 console.log(`✓ Found caption track: ${captionTrack.languageCode || 'unknown'}`);
                                                 console.log(`   Attempting to download transcript from URL...`);
                                                 const transcript = await this.downloadTranscriptFromUrl(captionUrl);
-                                                if (transcript && transcript.trim().length > 50) {
-                                                    console.log(`✓✓✓ SUCCESS: Downloaded transcript from caption track (${transcript.length} chars)`);
-                                                    return transcript;
+                                                if (transcript && transcript.trim().length > 30) {
+                                                    const normalized = this.normalizeTranscript(transcript);
+                                                    if (normalized.length > 30) {
+                                                        console.log(`✓✓✓ SUCCESS: Downloaded transcript from caption track (${normalized.length} chars)`);
+                                                        return normalized;
+                                                    }
                                                 } else {
                                                     console.log(`   ⚠️ Transcript download returned empty or too short (${transcript?.length || 0} chars)`);
                                                 }
@@ -779,7 +825,7 @@ class ContentService {
                             console.log(`✓ Found caption URL via regex: ${decodedUrl.substring(0, 100)}...`);
                             console.log(`   Attempting to download transcript from URL...`);
                             const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                            if (transcript && transcript.trim().length > 50) {
+                            if (transcript && transcript.trim().length > 30) {
                                 console.log(`✓✓✓ SUCCESS: Downloaded transcript via ScrapingBee (${transcript.length} chars)`);
                                 return transcript;
                             } else {
@@ -825,7 +871,7 @@ class ContentService {
                             console.log(`✓ Found transcript URL directly in HTML`);
                             console.log(`   Attempting to download transcript from URL...`);
                             const transcript = await this.downloadTranscriptFromUrl(decodedUrl);
-                            if (transcript && transcript.trim().length > 50) {
+                            if (transcript && transcript.trim().length > 30) {
                                 console.log(`✓✓✓ SUCCESS: Downloaded transcript directly from HTML (${transcript.length} chars)`);
                                 return transcript;
                             } else {
@@ -846,7 +892,7 @@ class ContentService {
                     console.log(`✓ Got transcript URL from API`);
                     console.log(`   Attempting to download transcript from URL...`);
                     const transcript = await this.downloadTranscriptFromUrl(transcriptUrl);
-                    if (transcript && transcript.trim().length > 50) {
+                    if (transcript && transcript.trim().length > 30) {
                         console.log(`✓✓✓ SUCCESS: Downloaded transcript via YouTube API (${transcript.length} chars)`);
                         return transcript;
                     } else {
@@ -936,8 +982,9 @@ class ContentService {
             
             if (transcriptItems.length > 0) {
                 const fullTranscript = transcriptItems.join(' ');
-                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items (${fullTranscript.length} chars)`);
-                return fullTranscript;
+                const normalized = this.normalizeTranscript(fullTranscript);
+                console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items (${normalized.length} chars)`);
+                return normalized;
             } else {
                 console.log(`   ⚠️ No transcript items found in XML (XML length: ${transcriptXml.length})`);
                 // Пробуем альтернативный формат парсинга
@@ -956,8 +1003,9 @@ class ContentService {
                 }
                 if (transcriptItems.length > 0) {
                     const fullTranscript = transcriptItems.join(' ');
-                    console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items using alternative parsing (${fullTranscript.length} chars)`);
-                    return fullTranscript;
+                    const normalized = this.normalizeTranscript(fullTranscript);
+                    console.log(`✓ Successfully extracted ${transcriptItems.length} transcript items using alternative parsing (${normalized.length} chars)`);
+                    return normalized;
                 }
             }
             
@@ -1315,9 +1363,12 @@ class ContentService {
                         return texts.join(' ').trim();
                     }, selector);
 
-                    if (transcriptText && transcriptText.length > 50) {
-                        console.log(`✓ Extracted transcript: ${transcriptText.length} chars`);
-                        return transcriptText;
+                    if (transcriptText && transcriptText.length > 30) {
+                        const normalized = this.normalizeTranscript(transcriptText);
+                        if (normalized.length > 30) {
+                            console.log(`✓ Extracted transcript: ${normalized.length} chars`);
+                            return normalized;
+                        }
                     }
                 } catch (e) {
                     continue;
@@ -1341,9 +1392,12 @@ class ContentService {
                     return texts.join(' ').trim();
                 });
                 
-                if (allText && allText.length > 50) {
-                    console.log(`✓ Extracted transcript from segments: ${allText.length} chars`);
-                    return allText;
+                if (allText && allText.length > 30) {
+                    const normalized = this.normalizeTranscript(allText);
+                    if (normalized.length > 30) {
+                        console.log(`✓ Extracted transcript from segments: ${normalized.length} chars`);
+                        return normalized;
+                    }
                 }
             } catch (e) {
                 // Игнорируем ошибки
@@ -1415,9 +1469,12 @@ class ContentService {
                     // Удаляем временный файл
                     await fs.remove(subFile);
                     
-                    if (subContent && subContent.length > 50) {
-                        console.log(`✓ Extracted transcript via yt-dlp: ${subContent.length} chars`);
-                        return subContent;
+                    if (subContent && subContent.length > 30) {
+                        const normalized = this.normalizeTranscript(subContent);
+                        if (normalized.length > 30) {
+                            console.log(`✓ Extracted transcript via yt-dlp: ${normalized.length} chars`);
+                            return normalized;
+                        }
                     }
                 }
             } catch (downloadError: any) {
@@ -1454,9 +1511,12 @@ class ContentService {
                         
                         await fs.remove(subFile);
                         
-                        if (subContent && subContent.length > 50) {
-                            console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${subContent.length} chars`);
-                            return subContent;
+                        if (subContent && subContent.length > 30) {
+                            const normalized = this.normalizeTranscript(subContent);
+                            if (normalized.length > 30) {
+                                console.log(`✓ Extracted transcript via yt-dlp (manual subs): ${normalized.length} chars`);
+                                return normalized;
+                            }
                         }
                     }
                 } catch (manualSubError: any) {
@@ -2180,7 +2240,7 @@ class ContentService {
             console.log(`🎤 Transcribing audio...`);
             const transcript = await this.transcribeAudio(audioPath);
             
-            return transcript;
+            return this.normalizeTranscript(transcript);
         } catch (error: any) {
             const errorMsg = error.message || 'Unknown error';
             console.error(`✗ Transcription failed for ${platform}: ${errorMsg}`);
@@ -2384,7 +2444,8 @@ class ContentService {
                     model: 'whisper-1',
                     language: 'ru',
                 });
-                return transcription.text;
+                const text = transcription.text || '';
+                return this.normalizeTranscript(text);
             } catch (error: any) {
                 console.warn(`OpenAI Whisper API failed: ${error.message}, falling back to local Whisper...`);
             }
@@ -2426,7 +2487,8 @@ class ContentService {
                 sampling_rate: decodedWav.sampleRate,
             } as any);
 
-            return (result as any).text || '';
+            const text = (result as any).text || '';
+            return this.normalizeTranscript(text);
         } catch (error: any) {
             throw new Error(`Transcription failed: ${error.message}`);
         }
