@@ -169,23 +169,9 @@ const startServer = async () => {
                 
                 if (embeddingType.length > 0) {
                     if (embeddingType[0].udt_name === 'text') {
-                        console.warn('⚠️ Column embedding is TEXT instead of vector. Fixing...');
-                        // Проверяем, установлено ли расширение vector
-                        const vectorExt = await sequelize.query(
-                            `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
-                            { type: QueryTypes.SELECT }
-                        ) as any[];
-                        
-                        if (vectorExt.length > 0) {
-                            // Расширение установлено - исправляем тип колонки
-                            await sequelize.query(`
-                                ALTER TABLE analysis_history DROP COLUMN IF EXISTS embedding;
-                                ALTER TABLE analysis_history ADD COLUMN embedding vector(768);
-                            `);
-                            console.log('✅ Column embedding type fixed: TEXT → vector(768)');
-                        } else {
-                            console.warn('⚠️ Extension vector is not installed. Run: CREATE EXTENSION vector;');
-                        }
+                        // НЕ пересоздаём колонку — DROP удалит все эмбеддинги!
+                        // Пользователь должен вручную выполнить fix-embedding-column.sql
+                        console.warn('⚠️ Column embedding is TEXT instead of vector. Run fix-embedding-column.sql manually to fix. Existing data will be preserved only if you run it once.');
                     } else if (embeddingType[0].udt_name === 'vector') {
                         console.log('✅ Column embedding has correct type: vector');
                     }
