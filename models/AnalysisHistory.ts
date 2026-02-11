@@ -84,9 +84,14 @@ AnalysisHistory.init(
             allowNull: true,
         },
         embedding: {
-            type: DataTypes.TEXT, // Sequelize не поддерживает vector напрямую, используем TEXT
+            // ВАЖНО: Sequelize не поддерживает тип vector напрямую
+            // Колонка должна быть создана вручную через SQL как vector(768)
+            // Используем DataTypes.TEXT только для определения модели, но не для синхронизации
+            type: DataTypes.TEXT,
             allowNull: true,
-            comment: 'Vector embedding for semantic search (pgvector)',
+            comment: 'Vector embedding for semantic search (pgvector) - тип vector(768) создается через SQL',
+            // Отключаем синхронизацию этой колонки - она управляется вручную через SQL
+            // Sequelize не будет изменять тип этой колонки при sync({ alter: true })
         },
     },
     {

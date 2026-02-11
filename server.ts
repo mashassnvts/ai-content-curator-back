@@ -1,6 +1,7 @@
 import express, { Application, Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { QueryTypes } from 'sequelize';
 import sequelize from './config/database';
 import analysisRoutes from './routes/analysis.routes';
 import userRoutes from './routes/user.routes';
@@ -151,10 +152,63 @@ const startServer = async () => {
         
         console.log('📊 Synchronizing database models...');
         // Используем alter: true для создания недостающих таблиц и обновления существующих
-        // НО: не создаем индексы для vector полей (они создаются вручную через SQL)
+        // ВАЖНО: Колонка embedding с типом vector(768) создается вручную через SQL
+        // Sequelize не поддерживает тип vector, поэтому после синхронизации проверяем и исправляем тип колонки
         try {
             await sequelize.sync({ alter: true, logging: false });
             console.log('✅ Database models synchronized successfully.');
+            
+            // Проверяем и исправляем тип колонки embedding после синхронизации
+            // Sequelize может изменить vector на TEXT при alter: true, поэтому исправляем это
+            try {
+                const embeddingType = await sequelize.query(
+                    `SELECT data_type, udt_name FROM information_schema.columns 
+                     WHERE table_name = 'analysis_history' AND column_name = 'embedding'`,
+                    { type: QueryTypes.SELECT }
+                ) as any[];
+                
+                if (embeddingType.length > 0) {
+                    if (embeddingType[0].udt_name === 'text') {
+                        console.warn('⚠️ Column embedding is TEXT instead of vector. Fixing...');
+                        // Проверяем, установлено ли расширение vector
+                        const vectorExt = await sequelize.query(
+                            `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
+                            { type: QueryTypes.SELECT }
+                        ) as any[];
+                        
+                        if (vectorExt.length > 0) {
+                            // Расширение установлено - исправляем тип колонки
+                            await sequelize.query(`
+                                ALTER TABLE analysis_history DROP COLUMN IF EXISTS embedding;
+                                ALTER TABLE analysis_history ADD COLUMN embedding vector(768);
+                            `);
+                            console.log('✅ Column embedding type fixed: TEXT → vector(768)');
+                        } else {
+                            console.warn('⚠️ Extension vector is not installed. Run: CREATE EXTENSION vector;');
+                        }
+                    } else if (embeddingType[0].udt_name === 'vector') {
+                        console.log('✅ Column embedding has correct type: vector');
+                    }
+                } else {
+                    // Колонка не существует - создаем её как vector(768)
+                    const vectorExt = await sequelize.query(
+                        `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
+                        { type: QueryTypes.SELECT }
+                    ) as any[];
+                    
+                    if (vectorExt.length > 0) {
+                        await sequelize.query(`
+                            ALTER TABLE analysis_history ADD COLUMN embedding vector(768);
+                        `);
+                        console.log('✅ Column embedding created with type: vector(768)');
+                    } else {
+                        console.warn('⚠️ Extension vector is not installed. Column embedding will be created as TEXT.');
+                    }
+                }
+            } catch (embeddingError: any) {
+                console.warn('⚠️ Could not check/fix embedding column type:', embeddingError.message);
+                console.log('💡 Run fix-embedding-column.sql manually to fix the column type');
+            }
         } catch (syncError: any) {
             // Если ошибка связана с vector индексом - игнорируем (индекс создается вручную)
             if (syncError.message && syncError.message.includes('vector_cosine_ops')) {
