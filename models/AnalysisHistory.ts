@@ -13,7 +13,7 @@ interface AnalysisHistoryAttributes {
     verdict: string;
     summary: string;
     reasoning: string;
-    embedding?: string | null; // Вектор эмбеддинга (хранится как TEXT, но используется как vector в SQL)
+    // embedding — управляется вручную, НЕ включён в модель чтобы Sequelize sync не перезаписывал vector на TEXT
 }
 
 interface AnalysisHistoryCreationAttributes extends Optional<AnalysisHistoryAttributes, 'id'> {}
@@ -29,7 +29,6 @@ class AnalysisHistory extends Model<AnalysisHistoryAttributes, AnalysisHistoryCr
     public verdict!: string;
     public summary!: string;
     public reasoning!: string;
-    public embedding?: string | null;
 
     public readonly createdAt!: Date;
     public readonly updatedAt!: Date;
@@ -82,16 +81,6 @@ AnalysisHistory.init(
         reasoning: {
             type: DataTypes.TEXT,
             allowNull: true,
-        },
-        embedding: {
-            // ВАЖНО: Sequelize не поддерживает тип vector напрямую
-            // Колонка должна быть создана вручную через SQL как vector(768)
-            // Используем DataTypes.TEXT только для определения модели, но не для синхронизации
-            type: DataTypes.TEXT,
-            allowNull: true,
-            comment: 'Vector embedding for semantic search (pgvector) - тип vector(768) создается через SQL',
-            // Отключаем синхронизацию этой колонки - она управляется вручную через SQL
-            // Sequelize не будет изменять тип этой колонки при sync({ alter: true })
         },
     },
     {
