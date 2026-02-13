@@ -1,4 +1,5 @@
 import axios from 'axios';
+import * as cheerio from 'cheerio';
 import TelegramChannel from '../models/TelegramChannel';
 import TelegramChannelPost from '../models/TelegramChannelPost';
 
@@ -55,6 +56,69 @@ export async function getChannelPosts(
     try {
         const username = channelUsername.replace('@', '');
         const posts: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
+
+        // Метод 0: HTTP + Cheerio (без Puppeteer — работает в Railway/контейнерах)
+        if (posts.length < limit) {
+            try {
+                const channelUrl = `https://t.me/s/${username}`;
+                const response = await axios.get(channelUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                    },
+                    timeout: 15000
+                });
+                const $ = cheerio.load(response.data);
+                const messageElements = $('.tgme_widget_message, [data-post], .tgme_widget_message_wrap').toArray();
+                const seenIds = new Set<number>();
+                for (const el of messageElements) {
+                    const $el = $(el);
+                    let messageId = 0;
+                    const dataPost = $el.attr('data-post');
+                    if (dataPost) {
+                        const match = dataPost.match(/\/(\d+)$/);
+                        if (match) messageId = parseInt(match[1], 10);
+                    }
+                    if (!messageId) {
+                        const href = $el.find('a[href*="/"]').first().attr('href') || $el.find('a[href*="t.me"]').first().attr('href') || '';
+                        const match = href.match(/\/(\d+)$/) || href.match(/t\.me\/[^/]+\/(\d+)/);
+                        if (match) messageId = parseInt(match[1], 10);
+                    }
+                    if (!messageId || seenIds.has(messageId) || (sinceMessageId && messageId <= sinceMessageId)) continue;
+                    seenIds.add(messageId);
+                    const text = $el.find('.tgme_widget_message_text').text().trim();
+                    const datetime = $el.find('.tgme_widget_message_date time').attr('datetime');
+                    const date = datetime ? new Date(datetime) : new Date();
+                    const postUrl = `https://t.me/${username}/${messageId}`;
+                    posts.push({ messageId, text, url: postUrl, date });
+                    if (posts.length >= limit) break;
+                }
+                // Fallback: извлекаем ссылки на посты из любых ссылок t.me/username/123
+                if (posts.length < limit) {
+                    const links = $(`a[href*="/${username}/"], a[href*="t.me/${username}/"]`).toArray();
+                    for (const a of links) {
+                        const href = $(a).attr('href') || '';
+                        const match = href.match(/\/(\d+)(?:\?|$)/);
+                        if (match) {
+                            const mid = parseInt(match[1], 10);
+                            if (!seenIds.has(mid) && (!sinceMessageId || mid > sinceMessageId)) {
+                                seenIds.add(mid);
+                                const text = $(a).closest('.tgme_widget_message, [data-post]').find('.tgme_widget_message_text').text().trim();
+                                posts.push({ messageId: mid, text, url: `https://t.me/${username}/${mid}`, date: new Date() });
+                                if (posts.length >= limit) break;
+                            }
+                        }
+                    }
+                }
+                posts.sort((a, b) => b.messageId - a.messageId);
+                if (posts.length > 0) {
+                    console.log(`✓ [getChannelPosts] Fetched ${posts.length} posts from @${username} via HTTP`);
+                    return posts.slice(0, limit);
+                }
+            } catch (httpError: any) {
+                console.log(`ℹ️ [getChannelPosts] HTTP method failed: ${httpError.message}`);
+            }
+        }
 
         // Метод 1: Пробуем через Telegram Bot API (если бот подписан на канал)
         try {
