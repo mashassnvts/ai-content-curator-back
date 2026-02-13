@@ -17,6 +17,7 @@ import './models/BotAnalysisHistory';
 import './models/UserInterestLevel';
 import './models/ContentRelevanceScore';
 import './models/UserSemanticTag';
+import './models/AnalysisStageStats';
 import TelegramChannel from './models/TelegramChannel';
 import TelegramChannelPost from './models/TelegramChannelPost';
 import historyCleanupService from './services/history-cleanup.service';

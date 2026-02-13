@@ -13,6 +13,7 @@ interface AnalysisHistoryAttributes {
     verdict: string;
     summary: string;
     reasoning: string;
+    originalText: string | null; // Оригинальный текст для прямого ввода
     // embedding — управляется вручную, НЕ включён в модель чтобы Sequelize sync не перезаписывал vector на TEXT
 }
 
@@ -29,6 +30,7 @@ class AnalysisHistory extends Model<AnalysisHistoryAttributes, AnalysisHistoryCr
     public verdict!: string;
     public summary!: string;
     public reasoning!: string;
+    public originalText!: string | null;
 
     public readonly createdAt!: Date;
     public readonly updatedAt!: Date;
@@ -81,6 +83,11 @@ AnalysisHistory.init(
         reasoning: {
             type: DataTypes.TEXT,
             allowNull: true,
+        },
+        originalText: {
+            type: DataTypes.TEXT,
+            allowNull: true,
+            field: 'original_text',
         },
     },
     {

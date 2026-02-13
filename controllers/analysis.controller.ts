@@ -16,11 +16,72 @@ import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
 import UserInterest from '../models/UserInterest';
+import AnalysisStageStats from '../models/AnalysisStageStats';
+import sequelize from '../config/database';
 
 const MAX_URLS_LIMIT = 25;
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
+
+// Маппинг этапов для статистики
+const STAGE_NAMES: Record<number, string> = {
+    0: 'Загрузка контента',
+    1: 'Извлечение транскрипта',
+    2: 'AI-анализ',
+    3: 'Генерация эмбеддинга',
+    4: 'Семантическое сравнение',
+    5: 'Оценка сложности',
+    6: 'Извлечение тем',
+    7: 'Формирование выводов'
+};
+
+// Хранилище времени начала этапов для каждого jobId
+const stageStartTimes = new Map<string, Map<number, number>>();
+
+/**
+ * Записывает статистику времени этапа
+ */
+const recordStageStats = async (stageId: number, stageName: string, itemType: 'channel' | 'urls' | 'text', durationMs: number) => {
+    try {
+        await AnalysisStageStats.create({
+            stageId,
+            stageName,
+            itemType,
+            durationMs,
+        });
+    } catch (error: any) {
+        console.warn(`⚠️ Failed to record stage stats: ${error.message}`);
+    }
+};
+
+/**
+ * Начинает отслеживание этапа
+ */
+const startStageTracking = (jobId: string, stageId: number) => {
+    if (!stageStartTimes.has(jobId)) {
+        stageStartTimes.set(jobId, new Map());
+    }
+    const jobStages = stageStartTimes.get(jobId)!;
+    jobStages.set(stageId, Date.now());
+};
+
+/**
+ * Завершает отслеживание этапа и записывает статистику
+ */
+const endStageTracking = async (jobId: string, stageId: number, itemType: 'channel' | 'urls' | 'text') => {
+    const jobStages = stageStartTimes.get(jobId);
+    if (!jobStages) return;
+    
+    const startTime = jobStages.get(stageId);
+    if (!startTime) return;
+    
+    const durationMs = Date.now() - startTime;
+    const stageName = STAGE_NAMES[stageId] || `Этап ${stageId}`;
+    
+    await recordStageStats(stageId, stageName, itemType, durationMs);
+    jobStages.delete(stageId);
+};
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
 // Используется для обхода таймаута Railway на длительных запросах
@@ -274,6 +335,7 @@ const processTextAnalysis = async (
                     verdict: analysisResult.verdict,
                     summary: analysisResult.summary,
                     reasoning: analysisResult.reasoning,
+                    originalText: text, // Сохраняем оригинальный текст
                 });
                 analysisHistoryId = historyRecord.id;
                 console.log(`💾 Saved text analysis to history (ID: ${analysisHistoryId})`);
@@ -369,15 +431,32 @@ export const processSingleUrlAnalysis = async (
         // Этап 0: Загрузка контента
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+            const itemType = job?.itemType || 'urls';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+                startStageTracking(jobId, 0);
+            }
         }
         
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
         
+        // Завершаем этап 0
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'urls';
+            await endStageTracking(jobId, 0, itemType);
+        }
+        
         // Этап 1: Извлечение транскрипта (для видео)
         if (jobId && itemIndex != null && sourceType === 'transcript') {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
+            const itemType = job?.itemType || 'urls';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
+                startStageTracking(jobId, 1);
+            }
+            // Транскрипт уже извлечен в extractContentFromUrl, завершаем этап сразу
+            await endStageTracking(jobId, 1, itemType);
         }
         
         // Логируем тип источника для диагностики
@@ -448,10 +527,21 @@ export const processSingleUrlAnalysis = async (
         // Этап 2: AI-анализ
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+            const itemType = job?.itemType || 'urls';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+                startStageTracking(jobId, 2);
+            }
         }
         
         const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType);
+        
+        // Завершаем этап 2
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'urls';
+            await endStageTracking(jobId, 2, itemType);
+        }
         
         // Обработка семантических тегов в зависимости от режима
         let semanticComparisonResult = null;
@@ -936,13 +1026,15 @@ const runAnalysisInBackground = async (
                     continue;
                 }
 
+                // Для каналов этапы берутся из processSingleUrlAnalysis для каждого поста
+                // Этапы будут обновляться внутри processSingleUrlAnalysis
                 analysisJobs.set(jobId, {
                     status: 'in_progress',
                     results: [...textResults, ...urlResults],
                     totalExpected: posts.length,
                     itemType: 'channel',
                     currentItemIndex: 0,
-                    currentStage: 1 // Этап 1: Анализ постов
+                    currentStage: 0 // Этап 0: Загрузка поста канала (для первого поста)
                 });
 
                 const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
@@ -974,6 +1066,8 @@ const runAnalysisInBackground = async (
                 for (let j = 0; j < posts.length; j++) {
                     const post = posts[j];
                     if (!post.url) continue;
+                    // Для каналов этапы берутся из processSingleUrlAnalysis для каждого поста
+                    // Этап 0: Загрузка поста канала (для каждого поста)
                     const job = analysisJobs.get(jobId);
                     if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: j, currentStage: 0 });
                     try {
@@ -1037,9 +1131,9 @@ const runAnalysisInBackground = async (
                     }
                 }
 
-                // Этап 4: Формирование рекомендации
+                // Этап 7: Формирование рекомендации (последний этап из processSingleUrlAnalysis)
                 const job = analysisJobs.get(jobId);
-                if (job) analysisJobs.set(jobId, { ...job, currentStage: 4 });
+                if (job) analysisJobs.set(jobId, { ...job, currentStage: 7 });
                 
                 const finalRecommendation = analyzedPosts.length === 0
                     ? (posts.length === 0 ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.' : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.')
@@ -1283,6 +1377,54 @@ export const testExtractThemes = async (req: Request, res: Response): Promise<Re
         console.error('Error in testExtractThemes:', error);
         return res.status(500).json({ 
             message: 'Error extracting themes', 
+            error: error.message || 'Unknown error'
+        });
+    }
+};
+
+/**
+ * Получить статистику времени этапов анализа
+ * GET /api/analysis/stage-stats
+ */
+export const getStageStats = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const stats = await AnalysisStageStats.findAll({
+            attributes: [
+                'stageId',
+                'stageName',
+                'itemType',
+                [sequelize.fn('AVG', sequelize.col('durationMs')), 'avgDurationMs'],
+                [sequelize.fn('MIN', sequelize.col('durationMs')), 'minDurationMs'],
+                [sequelize.fn('MAX', sequelize.col('durationMs')), 'maxDurationMs'],
+                [sequelize.fn('COUNT', sequelize.col('id')), 'count']
+            ],
+            group: ['stageId', 'stageName', 'itemType'],
+            order: [['itemType', 'ASC'], ['stageId', 'ASC']],
+        });
+
+        // Форматируем результаты
+        const formattedStats = stats.map((stat: any) => ({
+            stageId: stat.stageId,
+            stageName: stat.stageName,
+            itemType: stat.itemType,
+            avgDurationMs: Math.round(parseFloat(stat.dataValues.avgDurationMs || 0)),
+            minDurationMs: parseInt(stat.dataValues.minDurationMs || 0),
+            maxDurationMs: parseInt(stat.dataValues.maxDurationMs || 0),
+            count: parseInt(stat.dataValues.count || 0),
+            avgDurationSec: Math.round(parseFloat(stat.dataValues.avgDurationMs || 0) / 1000 * 10) / 10,
+            minDurationSec: Math.round(parseInt(stat.dataValues.minDurationMs || 0) / 1000 * 10) / 10,
+            maxDurationSec: Math.round(parseInt(stat.dataValues.maxDurationMs || 0) / 1000 * 10) / 10,
+        }));
+
+        return res.status(200).json({
+            success: true,
+            stats: formattedStats,
+            totalRecords: formattedStats.reduce((sum, s) => sum + s.count, 0)
+        });
+    } catch (error: any) {
+        console.error('Error fetching stage stats:', error);
+        return res.status(500).json({ 
+            message: 'Failed to fetch stage stats', 
             error: error.message || 'Unknown error'
         });
     }

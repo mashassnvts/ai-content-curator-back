@@ -30,6 +30,7 @@ export const getHistory = async (req: AuthenticatedRequest, res: Response): Prom
             verdict: item.verdict,
             summary: item.summary,
             reasoning: item.reasoning,
+            originalText: item.originalText,
             createdAt: item.createdAt,
             updatedAt: item.updatedAt,
             source: item.telegramId ? 'bot' as const : 'web' as const
