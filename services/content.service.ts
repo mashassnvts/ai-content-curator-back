@@ -60,15 +60,16 @@ class ContentService {
             
             if (videoPlatform === 'youtube') {
                 console.log('🎬 [YouTube] Attempting to extract video transcript (full content)...');
+                console.log('   ⚠️ IMPORTANT: Will try ALL transcript methods before falling back to metadata');
                 
                 // Метод 1: Puppeteer (открывает браузер и извлекает транскрипт со страницы) - ПРИОРИТЕТНЫЙ
                 try {
                     console.log('   [1/4] Trying Puppeteer (browser-based) for transcript...');
-                    // Увеличиваем таймаут до 60 секунд для Puppeteer
+                    // Увеличиваем таймаут до 90 секунд для Puppeteer (больше времени на загрузку и клики)
                     const transcriptText = await Promise.race([
                         this.getYouTubeTranscript(url),
                         new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 60000)
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 90000)
                         )
                     ]);
                     
@@ -77,11 +78,20 @@ class ContentService {
                         if (normalized.length > 30) {
                             console.log(`✓✓✓ SUCCESS: Using YouTube transcript (Puppeteer) (${normalized.length} chars)`);
                             return { content: normalized, sourceType: 'transcript' };
+                        } else {
+                            console.log(`   ⚠️ Puppeteer transcript too short after normalization (${normalized.length} chars)`);
                         }
+                    } else {
+                        console.log(`   ⚠️ Puppeteer returned empty or too short transcript (${transcriptText?.length || 0} chars)`);
                     }
                 } catch (puppeteerError: any) {
                     const errorMsg = puppeteerError.message || 'Unknown error';
-                    console.log(`   ⚠️ Puppeteer failed: ${errorMsg}`);
+                    // Не логируем таймаут как критическую ошибку, просто продолжаем
+                    if (errorMsg.includes('timeout')) {
+                        console.log(`   ⚠️ Puppeteer timeout (90s) - trying next method...`);
+                    } else {
+                        console.log(`   ⚠️ Puppeteer failed: ${errorMsg.substring(0, 100)}`);
+                    }
                 }
                 
                 // Метод 2: Библиотека youtube-transcript (быстрый, не требует браузер)
@@ -161,16 +171,27 @@ class ContentService {
                         if (normalized.length > 30) {
                             console.log(`✓✓✓ SUCCESS: Using yt-dlp transcript (${normalized.length} chars)`);
                             return { content: normalized, sourceType: 'transcript' };
+                        } else {
+                            console.log(`   ⚠️ yt-dlp transcript too short after normalization (${normalized.length} chars)`);
                         }
+                    } else {
+                        console.log(`   ⚠️ yt-dlp returned empty or too short transcript (${transcriptText?.length || 0} chars)`);
                     }
                 } catch (ytDlpError: any) {
                     const errorMsg = ytDlpError.message || 'Unknown error';
-                    console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg}`);
+                    // Если это блокировка бота, не логируем как ошибку
+                    if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                        console.log(`   ⚠️ yt-dlp blocked by YouTube (bot detection) - this is expected, trying other methods...`);
+                    } else {
+                        console.log(`   ⚠️ yt-dlp transcript extraction failed: ${errorMsg.substring(0, 100)}`);
+                    }
                 }
                 
                 // Все методы получения транскрипта провалились
                 console.log('⚠️⚠️⚠️ ALL TRANSCRIPT METHODS FAILED ⚠️⚠️⚠️');
-                console.log('❌ All transcript extraction methods failed for YouTube. Proceeding to metadata fallback...');
+                console.log('❌ All transcript extraction methods failed for YouTube.');
+                console.log('   → This video may not have transcripts available, or all methods were blocked.');
+                console.log('   → Proceeding to metadata fallback (title + description only)...');
             }
 
             // Для не-YouTube платформ: попытка автоматической транскрибации
@@ -1185,8 +1206,9 @@ class ContentService {
                 timeout: 90000 // Увеличено до 90 секунд
             });
 
-            // Ждем полной загрузки страницы
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            // Ждем полной загрузки страницы (увеличено время ожидания для надежности)
+            console.log('   Waiting for page to fully load...');
+            await new Promise(resolve => setTimeout(resolve, 8000)); // Увеличено с 5 до 8 секунд
 
             // Прокручиваем немного вниз чтобы загрузить все элементы
             await page.evaluate(() => {
@@ -1203,19 +1225,28 @@ class ContentService {
                     'button[aria-label*="Show transcript"]',
                     'ytd-menu-renderer button[aria-label*="transcript"]',
                     '#actions button[aria-label*="transcript"]',
-                    'ytd-menu-renderer button[aria-label*="расшифровка"]'
+                    'ytd-menu-renderer button[aria-label*="расшифровка"]',
+                    'button[title*="Show transcript"]',
+                    'button[title*="Показать расшифровку"]',
+                    '#button[aria-label*="transcript" i]', // case-insensitive
+                    'yt-icon-button[aria-label*="transcript" i]'
                 ];
 
                 for (const selector of transcriptButtonSelectors) {
                     try {
+                        // Ждем появления кнопки с увеличенным таймаутом
+                        await page.waitForSelector(selector, { timeout: 10000 }).catch(() => null);
                         const button = await page.$(selector);
                         if (button) {
                             await button.click();
                             console.log(`✓ Clicked transcript button: ${selector}`);
-                            await new Promise(resolve => setTimeout(resolve, 3000));
+                            // Увеличиваем время ожидания после клика для загрузки транскрипта
+                            await new Promise(resolve => setTimeout(resolve, 5000)); // Увеличено с 3 до 5 секунд
                             
                             const transcript = await this.extractTranscriptContent(page);
-                            if (transcript) return transcript;
+                            if (transcript && transcript.length > 30) {
+                                return transcript;
+                            }
                         }
                     } catch (e) {
                         continue;
@@ -1252,10 +1283,13 @@ class ContentService {
 
                 if (transcriptText === 'clicked') {
                     console.log('✓ Clicked transcript button by text');
-                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    // Увеличиваем время ожидания после клика
+                    await new Promise(resolve => setTimeout(resolve, 5000)); // Увеличено с 3 до 5 секунд
                     
                     const transcript = await this.extractTranscriptContent(page);
-                    if (transcript) return transcript;
+                    if (transcript && transcript.length > 30) {
+                        return transcript;
+                    }
                 }
             } catch (error: unknown) {
                 const errorMessage = error instanceof Error ? error.message : 'Unknown error';
@@ -1348,33 +1382,58 @@ class ContentService {
                 'ytd-transcript-segment-renderer',
                 '[role="document"]',
                 '#content-text',
-                'ytd-transcript-renderer'
+                'ytd-transcript-renderer',
+                'ytd-transcript-body-renderer',
+                '[id*="transcript"]',
+                '[class*="transcript"]',
+                '[class*="Transcript"]'
             ];
 
             for (const selector of panelSelectors) {
                 try {
-                    await page.waitForSelector(selector, { timeout: 10000 }); // Увеличено с 5 до 10 секунд
+                    // Увеличиваем таймаут ожидания панели транскрипта
+                    await page.waitForSelector(selector, { timeout: 15000 }).catch(() => null); // Не выбрасываем ошибку, если не найдено
                     
                     const transcriptText = await page.evaluate((sel: string) => {
-                        const panel = document.querySelector(sel);
+                        // Пробуем найти панель транскрипта
+                        let panel = document.querySelector(sel);
+                        
+                        // Если не нашли по селектору, пробуем найти любую панель с транскриптом
+                        if (!panel) {
+                            const allPanels = document.querySelectorAll('[id*="transcript"], [class*="transcript"], [class*="Transcript"], ytd-transcript-segment-renderer');
+                            if (allPanels.length > 0) {
+                                panel = allPanels[0] as Element;
+                            }
+                        }
+                        
                         if (!panel) return '';
                         
                         // Собираем текст из всех возможных элементов транскрипта
                         const textElements = panel.querySelectorAll(
-                            'yt-formatted-string, .segment-text, [role="text"], .ytd-transcript-segment-renderer, #content-text, ytd-transcript-segment-renderer yt-formatted-string'
+                            'yt-formatted-string, .segment-text, [role="text"], .ytd-transcript-segment-renderer, #content-text, ytd-transcript-segment-renderer yt-formatted-string, [class*="segment"], [class*="Segment"]'
                         );
+                        
+                        // Если не нашли элементы, пробуем получить весь текст панели
+                        if (textElements.length === 0) {
+                            const allText = panel.textContent || '';
+                            if (allText && allText.trim().length > 30) {
+                                return allText.trim();
+                            }
+                        }
                         
                         const texts: string[] = [];
                         textElements.forEach((el: Element) => {
                             const text = el.textContent?.trim();
                             if (text && 
-                                text.length > 10 && 
+                                text.length > 5 && // Уменьшено с 10 до 5 для более коротких фраз
                                 !text.match(/^\d+:\d+$/) && // исключаем временные метки
                                 !text.match(/^\d+:\d+:\d+$/) && // исключаем временные метки с секундами
                                 !text.includes('›') &&
-                                !text.includes('0:00') &&
+                                !text.match(/^0:00$/) &&
                                 !text.match(/^Show transcript$/i) &&
-                                !text.match(/^Показать расшифровку$/i)) {
+                                !text.match(/^Показать расшифровку$/i) &&
+                                !text.match(/^transcript$/i) &&
+                                !text.match(/^расшифровка$/i)) {
                                 texts.push(text);
                             }
                         });
@@ -1385,11 +1444,14 @@ class ContentService {
                     if (transcriptText && transcriptText.length > 30) {
                         const normalized = this.normalizeTranscript(transcriptText);
                         if (normalized.length > 30) {
-                            console.log(`✓ Extracted transcript: ${normalized.length} chars`);
+                            console.log(`✓ Extracted transcript from ${selector}: ${normalized.length} chars`);
                             return normalized;
+                        } else {
+                            console.log(`   ⚠️ Transcript too short after normalization: ${normalized.length} chars`);
                         }
                     }
                 } catch (e) {
+                    // Продолжаем поиск с другими селекторами
                     continue;
                 }
             }
