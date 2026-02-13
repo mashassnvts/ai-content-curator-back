@@ -1,7 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import UserSemanticTag from '../models/UserSemanticTag';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
-import { escapeControlCharsInJsonStrings } from '../utils/json-parse-helper';
 
 const apiKey = process.env.GEMINI_API_KEY;
 
@@ -335,8 +334,6 @@ ${processedText}
         if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
             cleanedResponse = cleanedResponse.substring(firstBracket, lastBracket + 1);
         }
-
-        cleanedResponse = escapeControlCharsInJsonStrings(cleanedResponse);
 
         console.log('Cleaned response (first 300 chars):', cleanedResponse.substring(0, 300));
 

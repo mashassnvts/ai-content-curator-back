@@ -113,8 +113,7 @@ export async function getChannelPosts(
                 
                 const browser = await puppeteer.launch({
                     headless: true,
-                    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-                    protocolTimeout: 180000 // 3 минуты — Railway/контейнеры отвечают медленно
+                    args: ['--no-sandbox', '--disable-setuid-sandbox']
                 });
 
                 const page = await browser.newPage();
