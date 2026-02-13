@@ -831,7 +831,7 @@ const runAnalysisInBackground = async (
                     itemType: 'channel'
                 });
 
-                const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; text?: string }> = [];
+                const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
                 let relevantCount = 0;
 
                 const userTags = userId ? await getUserTagsCached(userId) : [];
@@ -876,19 +876,32 @@ const runAnalysisInBackground = async (
                                     score: res.score,
                                     verdict: res.verdict,
                                     summary: typeof res.summary === 'string' ? res.summary : undefined,
+                                    reasoning: typeof res.reasoning === 'string' ? res.reasoning : undefined,
                                     text: post.text || undefined
                                 });
                                 if (res.score >= 70) relevantCount++;
-                                const postResult = {
-                                    originalUrl: post.url,
-                                    url: post.url,
-                                    score: res.score,
-                                    verdict: res.verdict,
-                                    summary: res.summary,
-                                    isChannelPost: true,
-                                    channelUsername
+                                // Не дублируем: только сводка канала (появляется по мере анализа)
+                                const partialRecommendation = analyzedPosts.length < posts.length
+                                    ? `Обработано ${analyzedPosts.length} из ${posts.length} постов...`
+                                    : (relevantCount === 0
+                                        ? `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%).`
+                                        : `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`);
+                                const partialChannelSummary = {
+                                    originalUrl: url,
+                                    isChannel: true,
+                                    channelUsername,
+                                    channelAnalysis: {
+                                        totalPosts: analyzedPosts.length,
+                                        relevantPosts: relevantCount,
+                                        posts: [...analyzedPosts],
+                                        recommendation: partialRecommendation
+                                    },
+                                    channelUrl: `https://t.me/${channelUsername}`
                                 };
-                                urlResults.push(postResult);
+                                // Заменяем предыдущую сводку канала на обновлённую
+                                const prevChannelIdx = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
+                                if (prevChannelIdx >= 0) urlResults[prevChannelIdx] = partialChannelSummary;
+                                else urlResults.push(partialChannelSummary);
                                 analysisJobs.set(jobId, {
                                     status: 'in_progress',
                                     results: [...textResults, ...urlResults],
@@ -902,30 +915,22 @@ const runAnalysisInBackground = async (
                     }
                 }
 
-                let recommendation = '';
-                if (analyzedPosts.length === 0) {
-                    recommendation = posts.length === 0
-                        ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.'
-                        : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.';
-                } else if (relevantCount === 0) {
-                    recommendation = `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%). Канал можно пропустить.`;
-                } else {
-                    recommendation = `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`;
+                // Финальная сводка уже в urlResults (обновлялась в цикле), обновляем recommendation
+                const finalRecommendation = analyzedPosts.length === 0
+                    ? (posts.length === 0 ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.' : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.')
+                    : relevantCount === 0
+                        ? `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%). Канал можно пропустить.`
+                        : `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`;
+                const channelIdx = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
+                if (channelIdx >= 0) {
+                    urlResults[channelIdx] = {
+                        ...urlResults[channelIdx],
+                        channelAnalysis: {
+                            ...urlResults[channelIdx].channelAnalysis,
+                            recommendation: finalRecommendation
+                        }
+                    };
                 }
-
-                const channelSummary = {
-                    originalUrl: url,
-                    isChannel: true,
-                    channelUsername,
-                    channelAnalysis: {
-                        totalPosts: analyzedPosts.length,
-                        relevantPosts: relevantCount,
-                        posts: analyzedPosts,
-                        recommendation
-                    },
-                    channelUrl: `https://t.me/${channelUsername}`
-                };
-                urlResults.push(channelSummary);
             } else {
                 const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
                 urlResults.push(result);
