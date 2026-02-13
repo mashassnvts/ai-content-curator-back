@@ -201,15 +201,27 @@ const processTextAnalysis = async (
                         console.log(`✅ [Mode: read] Saved ${themes.length} semantic tags to database`);
                     } else if (mode === 'unread') {
                         // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
-                        // Этап 4: Семантическое сравнение (для видео/URL)
+                        // Этап 4: Семантическое сравнение (для текста)
                         if (jobId && itemIndex != null) {
                             const job = analysisJobs.get(jobId);
-                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                            const itemType = job?.itemType || 'text';
+                            if (job) {
+                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                                startStageTracking(jobId, 4);
+                            }
                         }
                         
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
                         semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
+                        
+                        // Завершаем этап 4
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            const itemType = job?.itemType || 'text';
+                            await endStageTracking(jobId, 4, itemType);
+                        }
+                        
                         console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
                         
                         if (semanticComparisonResult.hasNoTags) {
@@ -543,6 +555,15 @@ export const processSingleUrlAnalysis = async (
             await endStageTracking(jobId, 2, itemType);
         }
         
+        // Этап 3: Генерация эмбеддинга (начинаем отслеживание, если будет использоваться)
+        if (jobId && itemIndex != null && userId && analysisResult?.summary) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'urls';
+            if (job && analysisResult.summary.length > 50) {
+                startStageTracking(jobId, 3);
+            }
+        }
+        
         // Обработка семантических тегов в зависимости от режима
         let semanticComparisonResult = null;
         let extractedThemes: string[] = [];
@@ -555,10 +576,21 @@ export const processSingleUrlAnalysis = async (
                 // Этап 6: Извлечение тем (раньше, чтобы показать прогресс)
                 if (jobId && itemIndex != null) {
                     const job = analysisJobs.get(jobId);
-                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 6 });
+                    const itemType = job?.itemType || 'urls';
+                    if (job) {
+                        analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 6 });
+                        startStageTracking(jobId, 6);
+                    }
                 }
                 
                 const themes = await extractThemes(content);
+                
+                // Завершаем этап 6
+                if (jobId && itemIndex != null) {
+                    const job = analysisJobs.get(jobId);
+                    const itemType = job?.itemType || 'urls';
+                    await endStageTracking(jobId, 6, itemType);
+                }
                 
                 if (themes.length > 0) {
                     if (IS_DEBUG) {
@@ -577,12 +609,24 @@ export const processSingleUrlAnalysis = async (
                         // Этап 4: Семантическое сравнение (для видео/URL)
                         if (jobId && itemIndex != null) {
                             const job = analysisJobs.get(jobId);
-                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                            const itemType = job?.itemType || 'urls';
+                            if (job) {
+                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                                startStageTracking(jobId, 4);
+                            }
                         }
                         
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
                         semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
+                        
+                        // Завершаем этап 4
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            const itemType = job?.itemType || 'urls';
+                            await endStageTracking(jobId, 4, itemType);
+                        }
+                        
                         console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
                         
                         if (semanticComparisonResult.hasNoTags) {
@@ -674,7 +718,11 @@ export const processSingleUrlAnalysis = async (
                             // Этап 5: Оценка сложности
                             if (jobId && itemIndex != null) {
                                 const job = analysisJobs.get(jobId);
-                                if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 5 });
+                                const itemType = job?.itemType || 'urls';
+                                if (job) {
+                                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 5 });
+                                    startStageTracking(jobId, 5);
+                                }
                             }
                             
                             const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
@@ -684,6 +732,13 @@ export const processSingleUrlAnalysis = async (
                                     setTimeout(() => reject(new Error('Relevance level analysis timeout')), 30000)
                                 )
                             ]);
+                            
+                            // Завершаем этап 5
+                            if (jobId && itemIndex != null) {
+                                const job = analysisJobs.get(jobId);
+                                const itemType = job?.itemType || 'urls';
+                                await endStageTracking(jobId, 5, itemType);
+                            }
                             
                             // Сохраняем оценку релевантности для каждого интереса
                             for (const { interest, result } of relevanceResults) {
@@ -783,10 +838,21 @@ export const processSingleUrlAnalysis = async (
                         // Этап 3: Генерация эмбеддинга
                         if (jobId && itemIndex != null) {
                             const job = analysisJobs.get(jobId);
-                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 3 });
+                            const itemType = job?.itemType || 'urls';
+                            if (job) {
+                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 3 });
+                            }
                         }
                         
                         await generateAndSaveEmbedding(textForEmbedding, analysisHistoryId);
+                        
+                        // Завершаем этап 3
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            const itemType = job?.itemType || 'urls';
+                            await endStageTracking(jobId, 3, itemType);
+                        }
+                        
                         console.log(`✅ Generated and saved embedding for analysis_history ID: ${analysisHistoryId} (using summary + URL: ${textForEmbedding.length} chars)`);
                     } catch (embeddingError: any) {
                         console.warn(`⚠️ Failed to generate/save embedding for ID ${analysisHistoryId}: ${embeddingError.message}`);
@@ -817,7 +883,21 @@ export const processSingleUrlAnalysis = async (
         // Этап 7: Формирование выводов
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
+            const itemType = job?.itemType || 'urls';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
+                startStageTracking(jobId, 7);
+            }
+        }
+        
+        // Завершаем этап 7 (сразу после начала, так как это финальный этап)
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'urls';
+            // Небольшая задержка для корректного измерения времени финального этапа
+            setTimeout(async () => {
+                await endStageTracking(jobId, 7, itemType);
+            }, 100);
         }
         
         return {
