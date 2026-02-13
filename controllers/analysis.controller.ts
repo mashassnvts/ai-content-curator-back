@@ -767,8 +767,43 @@ const runAnalysisInBackground = async (
                 if (!channelUsername) continue;
 
                 const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
-                const allFetched = await getChannelPosts(channelUsername, fetchLimit);
+                let allFetched: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
+                try {
+                    allFetched = await getChannelPosts(channelUsername, fetchLimit);
+                } catch (fetchError: any) {
+                    console.error(`❌ [analysis] Failed to fetch posts from @${channelUsername}:`, fetchError.message);
+                    const errResult = {
+                        originalUrl: url,
+                        isChannel: true,
+                        channelUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: `Не удалось получить посты из канала @${channelUsername}. Возможно, канал приватный, недоступен или произошла ошибка при загрузке.`
+                        }
+                    };
+                    urlResults.push(errResult);
+                    continue;
+                }
+                
                 const posts = allFetched.slice(0, POSTS_TO_ANALYZE);
+
+                if (posts.length === 0) {
+                    const errResult = {
+                        originalUrl: url,
+                        isChannel: true,
+                        channelUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: `Не удалось получить посты из канала @${channelUsername}. Возможно, канал приватный или недоступен.`
+                        }
+                    };
+                    urlResults.push(errResult);
+                    continue;
+                }
 
                 analysisJobs.set(jobId, {
                     status: 'in_progress',
