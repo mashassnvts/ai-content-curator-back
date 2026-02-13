@@ -254,14 +254,27 @@ class ContentService {
             }
             
             // 5. FALLBACK 2: Парсинг страницы через Puppeteer (более медленный, но позволяет собрать доп. текст и комментарии)
+            // Используем Promise.race с коротким таймаутом, чтобы не ждать слишком долго
             try {
-                const metadata = await this.extractVideoMetadata(url, videoPlatform);
+                const metadataPromise = this.extractVideoMetadata(url, videoPlatform);
+                const timeoutPromise = new Promise<null>((resolve) => 
+                    setTimeout(() => resolve(null), 25000) // Таймаут 25 секунд
+                );
+                
+                const metadata = await Promise.race([metadataPromise, timeoutPromise]);
                 if (metadata && metadata.content && metadata.content.trim().length > 100) {
                     console.log(`✓ Using Puppeteer metadata for ${videoPlatform} (includes page content)`);
                     return metadata;
+                } else if (metadata === null) {
+                    console.warn(`⚠️ Metadata extraction (puppeteer) timed out for ${videoPlatform}, trying basic metadata...`);
                 }
             } catch (error: any) {
-                console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${error.message}`);
+                const errorMsg = error.message || '';
+                if (errorMsg.includes('timeout') || errorMsg.includes('Navigation timeout')) {
+                    console.warn(`⚠️ Metadata extraction (puppeteer) timed out for ${videoPlatform}, trying basic metadata...`);
+                } else {
+                    console.warn(`⚠️ Metadata extraction (puppeteer) failed for ${videoPlatform}: ${errorMsg}`);
+                }
             }
 
             // 6. ПОСЛЕДНИЙ FALLBACK: play-dl (только для YouTube, если все остальное провалилось)
@@ -1875,9 +1888,10 @@ class ContentService {
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
 
+            // Для YouTube используем короткий таймаут и domcontentloaded для быстрого извлечения метаданных
             // Для VK увеличиваем время ожидания и используем networkidle для полной загрузки
             const waitUntil = platform === 'vk' ? 'networkidle2' : 'domcontentloaded';
-            const timeout = platform === 'vk' ? 90000 : 60000;
+            const timeout = platform === 'vk' ? 90000 : (platform === 'youtube' ? 20000 : 60000); // Для YouTube 20 секунд
             
             await page.goto(url, { 
                 waitUntil,
@@ -2196,7 +2210,7 @@ class ContentService {
 
     /**
      * Финальный fallback: извлекает базовые метаданные (og:title, og:description) 
-     * Сначала пробует простой HTTP-запрос (без браузера), потом Puppeteer
+     * Сначала пробует простой HTTP-запрос (без браузера), потом Puppeteer с коротким таймаутом
      */
     private async extractBasicMetadata(url: string): Promise<ExtractedContent | null> {
         // Сначала пробуем простой HTTP-запрос (не требует браузера)
@@ -2205,12 +2219,13 @@ class ContentService {
             
             // Используем AbortController для таймаута
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const timeoutId = setTimeout(() => controller.abort(), 15000); // Увеличиваем до 15 секунд
             
             const response = await fetch(url, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
                 },
                 signal: controller.signal
             });
@@ -2223,35 +2238,68 @@ class ContentService {
             
             const html = await response.text();
             
-            // Извлекаем og:tags и title из HTML через regex
+            // Извлекаем og:tags и title из HTML через regex (более надежный парсинг)
             const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
             const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
             const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
             
-            const title = ogTitleMatch?.[1] || titleMatch?.[1] || '';
-            const description = ogDescMatch?.[1] || '';
+            // Для YouTube также пробуем извлечь дополнительные данные из JSON-LD
+            let jsonLdData: any = null;
+            try {
+                const jsonLdMatches = html.match(/<script\s+type=["']application\/ld\+json["']>([\s\S]*?)<\/script>/gi);
+                if (jsonLdMatches) {
+                    for (const match of jsonLdMatches) {
+                        try {
+                            const jsonContent = match.replace(/<script[^>]*>|<\/script>/gi, '').trim();
+                            const parsed = JSON.parse(jsonContent);
+                            if (parsed.name || parsed.headline || parsed.description) {
+                                jsonLdData = parsed;
+                                break;
+                            }
+                        } catch (e) {
+                            // Игнорируем ошибки парсинга JSON
+                        }
+                    }
+                }
+            } catch (e) {
+                // Игнорируем ошибки извлечения JSON-LD
+            }
+            
+            const title = ogTitleMatch?.[1] || jsonLdData?.name || jsonLdData?.headline || titleMatch?.[1] || '';
+            const description = ogDescMatch?.[1] || jsonLdData?.description || '';
+            
+            // Для YouTube также пробуем извлечь информацию о канале
+            let channelInfo = '';
+            if (url.includes('youtube.com') || url.includes('youtu.be')) {
+                const channelMatch = html.match(/<link\s+itemprop=["']name["']\s+content=["']([^"']+)["']/i);
+                const channelMatch2 = html.match(/<meta\s+itemprop=["']channelId["']\s+content=["']([^"']+)["']/i);
+                if (channelMatch || channelMatch2) {
+                    channelInfo = `\n\nКанал: ${channelMatch?.[1] || 'YouTube'}`;
+                }
+            }
             
             if (title || description) {
                 const contentParts: string[] = [];
                 if (title) contentParts.push(`Название: ${title}`);
                 if (description) contentParts.push(`\n\nОписание: ${description}`);
+                if (channelInfo) contentParts.push(channelInfo);
                 
                 const content = contentParts.join('') + 
-                    '\n\n⚠️ ВАЖНО: Это только базовые метаданные (og:tags). Полный контент недоступен без браузера.';
+                    '\n\n⚠️ ВАЖНО: Это только базовые метаданные (og:tags и JSON-LD). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных, без доступа к полному содержанию видео.';
                 
-                console.log(`✓ Extracted basic metadata via HTTP (title: ${title ? 'yes' : 'no'}, desc: ${description ? 'yes' : 'no'})`);
+                console.log(`✓ Extracted basic metadata via HTTP (title: ${title ? 'yes' : 'no'}, desc: ${description ? 'yes' : 'no'}, jsonLd: ${jsonLdData ? 'yes' : 'no'})`);
                 return { content, sourceType: 'metadata' };
             }
         } catch (httpError: any) {
             if (httpError.name === 'AbortError') {
-                console.warn(`⚠️ HTTP metadata extraction timed out after 10 seconds`);
+                console.warn(`⚠️ HTTP metadata extraction timed out after 15 seconds`);
             } else {
                 console.warn(`⚠️ HTTP metadata extraction failed: ${httpError.message}`);
             }
-            console.log(`   Trying Puppeteer fallback...`);
+            console.log(`   Trying Puppeteer fallback with shorter timeout...`);
         }
         
-        // Fallback на Puppeteer (если HTTP не сработал)
+        // Fallback на Puppeteer с коротким таймаутом (если HTTP не сработал)
         let browser = null;
         try {
             console.log(`Extracting basic metadata via Puppeteer from: ${url}`);
@@ -2264,21 +2312,29 @@ class ContentService {
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
 
-            // Загружаем только до domcontentloaded для скорости
+            // Используем короткий таймаут для быстрого извлечения только метаданных
             await page.goto(url, { 
                 waitUntil: 'domcontentloaded',
-                timeout: 30000
+                timeout: 20000 // Уменьшаем таймаут до 20 секунд
             });
 
-            // Извлекаем только og:tags (самые надежные метаданные)
+            // Извлекаем только og:tags и title (самые надежные метаданные)
             const metadata = await page.evaluate(() => {
                 const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
                 const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
                 const title = document.querySelector('title')?.textContent || '';
                 
+                // Для YouTube также пробуем извлечь информацию о канале
+                let channelName = '';
+                const channelLink = document.querySelector('link[itemprop="name"]')?.getAttribute('content');
+                if (channelLink) {
+                    channelName = channelLink;
+                }
+                
                 return {
                     title: ogTitle || title,
-                    description: ogDescription
+                    description: ogDescription,
+                    channelName
                 };
             });
 
@@ -2286,6 +2342,7 @@ class ContentService {
                 const contentParts: string[] = [];
                 if (metadata.title) contentParts.push(`Название: ${metadata.title}`);
                 if (metadata.description) contentParts.push(`\n\nОписание: ${metadata.description}`);
+                if (metadata.channelName) contentParts.push(`\n\nКанал: ${metadata.channelName}`);
 
                 const content = contentParts.join('') + 
                     '\n\n⚠️ ВАЖНО: Это только базовые метаданные (og:tags). Полная расшифровка видео недоступна. Анализ проводится ТОЛЬКО на основе этих метаданных, без доступа к полному содержанию видео.';
@@ -2297,11 +2354,20 @@ class ContentService {
             return null;
         } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-            console.warn(`⚠️ Puppeteer metadata extraction failed: ${errorMessage}`);
+            // Если это таймаут, не логируем как критическую ошибку
+            if (errorMessage.includes('timeout') || errorMessage.includes('Navigation timeout')) {
+                console.warn(`⚠️ Puppeteer metadata extraction timed out (expected for slow pages)`);
+            } else {
+                console.warn(`⚠️ Puppeteer metadata extraction failed: ${errorMessage}`);
+            }
             return null;
         } finally {
             if (browser) {
-                await browser.close();
+                try {
+                    await browser.close();
+                } catch (e) {
+                    // Игнорируем ошибки закрытия браузера
+                }
             }
         }
     }
