@@ -22,9 +22,9 @@ const MAX_URLS_LIMIT = 25;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
 
-// Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected? })
+// Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls' }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -757,6 +757,17 @@ const runAnalysisInBackground = async (
         const urlResults: any[] = [];
         const POSTS_TO_ANALYZE = 6;
 
+        // Для обычных ссылок — сразу показываем прогресс
+        const hasChannels = uniqueUrls.some(u => /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(u));
+        if (!hasChannels && uniqueUrls.length > 0) {
+            analysisJobs.set(jobId, {
+                status: 'in_progress',
+                results: [...textResults],
+                totalExpected: uniqueUrls.length,
+                itemType: 'urls'
+            });
+        }
+
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
             const telegramChannelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
@@ -766,11 +777,12 @@ const runAnalysisInBackground = async (
                 const channelUsername = telegramChannelMatch[1].replace('@', '').trim();
                 if (!channelUsername) continue;
 
-                // Сразу показываем прогресс "0 из 6" — чтобы пользователь видел, что идёт загрузка
+                // Сразу показываем прогресс "0 из 6 постов" — чтобы пользователь видел, что идёт загрузка
                 analysisJobs.set(jobId, {
                     status: 'in_progress',
                     results: [...textResults, ...urlResults],
-                    totalExpected: POSTS_TO_ANALYZE
+                    totalExpected: POSTS_TO_ANALYZE,
+                    itemType: 'channel'
                 });
 
                 const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
@@ -815,7 +827,8 @@ const runAnalysisInBackground = async (
                 analysisJobs.set(jobId, {
                     status: 'in_progress',
                     results: [...textResults, ...urlResults],
-                    totalExpected: posts.length
+                    totalExpected: posts.length,
+                    itemType: 'channel'
                 });
 
                 const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; text?: string }> = [];
@@ -879,7 +892,8 @@ const runAnalysisInBackground = async (
                                 analysisJobs.set(jobId, {
                                     status: 'in_progress',
                                     results: [...textResults, ...urlResults],
-                                    totalExpected: posts.length
+                                    totalExpected: posts.length,
+                                    itemType: 'channel'
                                 });
                             }
                         }
@@ -915,6 +929,13 @@ const runAnalysisInBackground = async (
             } else {
                 const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
                 urlResults.push(result);
+                // Сразу обновляем job — чтобы фронтенд показывал результат, не дожидаясь остальных
+                analysisJobs.set(jobId, {
+                    status: i < uniqueUrls.length - 1 ? 'in_progress' : 'completed',
+                    results: [...textResults, ...urlResults],
+                    totalExpected: uniqueUrls.length,
+                    itemType: 'urls'
+                });
             }
             if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
