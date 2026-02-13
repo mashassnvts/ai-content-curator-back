@@ -103,6 +103,7 @@ export async function getChannelPosts(
 
         // Метод 2: Веб-скрапинг через Puppeteer (для публичных каналов)
         if (posts.length < limit) {
+            let browser: any = null;
             try {
                 console.log(`🌐 [getChannelPosts] Trying web scraping for @${username}...`);
                 const puppeteer = (await import('puppeteer-extra')).default;
@@ -111,9 +112,10 @@ export async function getChannelPosts(
 
                 const channelUrl = `https://t.me/s/${username}`;
                 
-                const browser = await puppeteer.launch({
+                browser = await puppeteer.launch({
                     headless: true,
-                    args: ['--no-sandbox', '--disable-setuid-sandbox']
+                    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+                    protocolTimeout: 120000 // Увеличиваем таймаут протокола до 2 минут
                 });
 
                 const page = await browser.newPage();
@@ -212,8 +214,6 @@ export async function getChannelPosts(
                     return posts;
                 }, sinceMessageId || 0);
 
-                await browser.close();
-
                 // Добавляем скрапленные посты (уже отсортированы по messageId desc)
                 for (const post of scrapedPosts) {
                     if (!posts.find(p => p.messageId === post.messageId)) {
@@ -224,6 +224,16 @@ export async function getChannelPosts(
                 console.log(`✓ [getChannelPosts] Scraped ${scrapedPosts.length} posts from @${username}`);
             } catch (scrapingError: any) {
                 console.warn(`⚠️ [getChannelPosts] Web scraping failed: ${scrapingError.message}`);
+                // Не прерываем выполнение - возвращаем то, что уже получили через Bot API
+            } finally {
+                // Всегда закрываем браузер, даже при ошибке
+                if (browser) {
+                    try {
+                        await browser.close();
+                    } catch (closeError: any) {
+                        console.warn(`⚠️ [getChannelPosts] Failed to close browser: ${closeError.message}`);
+                    }
+                }
             }
         }
 
