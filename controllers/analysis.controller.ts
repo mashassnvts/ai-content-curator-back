@@ -14,15 +14,17 @@ import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
+import { getChannelPosts } from '../services/telegram-channel.service';
+import UserInterest from '../models/UserInterest';
 
 const MAX_URLS_LIMIT = 25;
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
 
-// Хранилище асинхронных задач анализа (jobId -> { status, results?, error? })
+// Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'completed' | 'error'; results?: any[]; error?: string }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -36,9 +38,10 @@ const isValidUrl = (str: string): boolean => {
         return false;
     }
     
-    // Проверяем Telegram-ссылку (https://t.me/channel/message_id)
-    const telegramPattern = /^https?:\/\/t\.me\/[^\/]+\/\d+/;
-    if (telegramPattern.test(trimmed)) {
+    // Проверяем Telegram-ссылку (https://t.me/channel/message_id или https://t.me/channel)
+    const telegramPostPattern = /^https?:\/\/t\.me\/[^\/]+\/\d+/;
+    const telegramChannelPattern = /^https?:\/\/t\.me\/([^\/]+)\/?$/; // канал без ID поста (с опциональным / в конце)
+    if (telegramPostPattern.test(trimmed) || telegramChannelPattern.test(trimmed)) {
         return true;
     }
     
@@ -752,10 +755,125 @@ const runAnalysisInBackground = async (
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
 
         const urlResults: any[] = [];
+        const POSTS_TO_ANALYZE = 6;
+
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
-            const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
-            urlResults.push(result);
+            const telegramChannelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
+
+            if (telegramChannelMatch) {
+                // Ссылка на канал (без ID поста) — анализируем последние 6 постов
+                const channelUsername = telegramChannelMatch[1].replace('@', '').trim();
+                if (!channelUsername) continue;
+
+                const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
+                const allFetched = await getChannelPosts(channelUsername, fetchLimit);
+                const posts = allFetched.slice(0, POSTS_TO_ANALYZE);
+
+                analysisJobs.set(jobId, {
+                    status: 'in_progress',
+                    results: [...textResults, ...urlResults],
+                    totalExpected: posts.length
+                });
+
+                const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; text?: string }> = [];
+                let relevantCount = 0;
+
+                const userTags = userId ? await getUserTagsCached(userId) : [];
+                const contextForAnalysis = userTags.length > 0
+                    ? userTags.map((t: { tag: string }) => t.tag).join(', ')
+                    : userId
+                        ? (await UserInterest.findAll({ where: { userId, isActive: true } })).map((ui: { interest: string }) => ui.interest).join(', ')
+                        : interests;
+
+                if (!contextForAnalysis) {
+                    const errResult = {
+                        originalUrl: url,
+                        isChannel: true,
+                        channelUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: 'Добавьте темы в облако смыслов: проанализируйте статьи в режиме "Я прочитал и понравилось".'
+                        }
+                    };
+                    urlResults.push(errResult);
+                    continue;
+                }
+
+                for (let j = 0; j < posts.length; j++) {
+                    const post = posts[j];
+                    if (!post.url) continue;
+                    try {
+                        const analysisResult = await processSingleUrlAnalysis(
+                            post.url,
+                            contextForAnalysis,
+                            feedbackHistory,
+                            userId,
+                            'unread'
+                        );
+                        if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
+                            const res = analysisResult as any;
+                            if (res && typeof res.score === 'number' && typeof res.verdict === 'string') {
+                                analyzedPosts.push({
+                                    url: post.url,
+                                    score: res.score,
+                                    verdict: res.verdict,
+                                    summary: typeof res.summary === 'string' ? res.summary : undefined,
+                                    text: post.text || undefined
+                                });
+                                if (res.score >= 70) relevantCount++;
+                                const postResult = {
+                                    originalUrl: post.url,
+                                    url: post.url,
+                                    score: res.score,
+                                    verdict: res.verdict,
+                                    summary: res.summary,
+                                    isChannelPost: true,
+                                    channelUsername
+                                };
+                                urlResults.push(postResult);
+                                analysisJobs.set(jobId, {
+                                    status: 'in_progress',
+                                    results: [...textResults, ...urlResults],
+                                    totalExpected: posts.length
+                                });
+                            }
+                        }
+                    } catch (analysisError: any) {
+                        console.error(`⚠️ [analysis] Failed to analyze post ${post.url}:`, analysisError.message);
+                    }
+                }
+
+                let recommendation = '';
+                if (analyzedPosts.length === 0) {
+                    recommendation = posts.length === 0
+                        ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.'
+                        : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.';
+                } else if (relevantCount === 0) {
+                    recommendation = `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%). Канал можно пропустить.`;
+                } else {
+                    recommendation = `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`;
+                }
+
+                const channelSummary = {
+                    originalUrl: url,
+                    isChannel: true,
+                    channelUsername,
+                    channelAnalysis: {
+                        totalPosts: analyzedPosts.length,
+                        relevantPosts: relevantCount,
+                        posts: analyzedPosts,
+                        recommendation
+                    },
+                    channelUrl: `https://t.me/${channelUsername}`
+                };
+                urlResults.push(channelSummary);
+            } else {
+                const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
+                urlResults.push(result);
+            }
             if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
 
