@@ -23,7 +23,7 @@ const IS_DEBUG = LOG_LEVEL === 'debug';
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'completed' | 'error'; results?: any[]; error?: string }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -756,6 +756,13 @@ const runAnalysisInBackground = async (
             } else allUrls.add(url);
         }
 
+        // Для каналов: сразу показываем ожидаемое кол-во, чтобы клиент видел «Анализируется: 0 из N»
+        if (channelUrlsToExpand.length > 0) {
+            const estimatedPosts = channelUrlsToExpand.length * 6;
+            const estimatedTotal = textResults.length + allUrls.size + estimatedPosts;
+            analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults], totalExpected: estimatedTotal });
+        }
+
         // Обрабатываем каналы: получаем 5–6 постов, добавляем их URL в очередь (без сохранения канала в БД)
         for (const channelUrl of channelUrlsToExpand) {
             const match = channelUrl.match(/^https?:\/\/t\.me\/([^\/]+)$/);
@@ -775,11 +782,15 @@ const runAnalysisInBackground = async (
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
 
+        const totalExpected = textResults.length + uniqueUrls.length;
+        analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults], totalExpected });
+
         const urlResults: any[] = [];
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
             const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
             urlResults.push(result);
+            analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults, ...urlResults], totalExpected });
             if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
 
@@ -791,7 +802,7 @@ const runAnalysisInBackground = async (
             } catch (e) {}
         }
 
-        analysisJobs.set(jobId, { status: 'completed', results });
+        analysisJobs.set(jobId, { status: 'completed', results, totalExpected });
         console.log('✅ [Job ' + jobId + '] Analysis completed, results:', results.length);
     } catch (error: any) {
         console.error('❌ [Job ' + jobId + '] Analysis failed:', error.message);
