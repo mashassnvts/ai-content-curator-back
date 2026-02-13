@@ -667,10 +667,12 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
         return res;
     }
     
-    // Устанавливаем заголовки для поддержания соединения активным (только один раз, до отправки ответа)
+    // Отправляем заголовки СРАЗУ, чтобы Railway не закрыл соединение по таймауту
+    // Railway закрывает соединения без активности через ~30-60 секунд
     if (!res.headersSent) {
         res.setHeader('Connection', 'keep-alive');
         res.setHeader('X-Accel-Buffering', 'no'); // Отключаем буферизацию для Railway
+        // Content-Type установим при отправке ответа через res.json()
     }
     
     try {
@@ -938,20 +940,8 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
                 return res;
             }
             
-            // Отправляем заголовки сразу, чтобы Railway не закрыл соединение
-            if (!res.headersSent) {
-                res.setHeader('Content-Type', 'application/json');
-                res.setHeader('Connection', 'keep-alive');
-                res.setHeader('X-Accel-Buffering', 'no');
-            }
-            
-            // Еще одна проверка после установки заголовков
-            if (res.writableEnded || res.destroyed || !res.writable) {
-                console.warn('⚠️ Connection closed after setting headers');
-                return res;
-            }
-            
-            res.status(200).json(results);
+            // Отправляем JSON ответ (Express автоматически установит Content-Type)
+            res.json(results);
             console.log('✅ Response sent successfully');
         } catch (sendError: any) {
             // Обрабатываем ошибки отправки (например, ECONNRESET, EPIPE)

@@ -151,15 +151,15 @@ const startServer = async () => {
         console.log('✅ Database connection established successfully.');
         
         console.log('📊 Synchronizing database models...');
-        // Используем alter: true для создания недостающих таблиц и обновления существующих
-        // ВАЖНО: Колонка embedding с типом vector(768) создается вручную через SQL
-        // Sequelize не поддерживает тип vector, поэтому после синхронизации проверяем и исправляем тип колонки
+        // Используем alter: false — иначе Sequelize УДАЛЯЕТ колонку embedding при sync (её нет в модели).
+        // DROP column при каждом рестарте = потеря всех эмбеддингов. alter: false сохраняет колонку.
+        // Колонка embedding создаётся вручную ниже, если её ещё нет.
         try {
-            await sequelize.sync({ alter: true, logging: false });
+            await sequelize.sync({ alter: false, logging: false });
             console.log('✅ Database models synchronized successfully.');
             
-            // Проверяем и исправляем тип колонки embedding после синхронизации
-            // Sequelize может изменить vector на TEXT при alter: true, поэтому исправляем это
+            // Проверяем и создаём колонку embedding только если её нет
+            // НЕ изменяем тип существующей колонки — это сохраняет данные
             try {
                 const embeddingType = await sequelize.query(
                     `SELECT data_type, udt_name FROM information_schema.columns 
@@ -168,15 +168,16 @@ const startServer = async () => {
                 ) as any[];
                 
                 if (embeddingType.length > 0) {
-                    if (embeddingType[0].udt_name === 'text') {
-                        // НЕ пересоздаём колонку — DROP удалит все эмбеддинги!
-                        // Пользователь должен вручную выполнить fix-embedding-column.sql
-                        console.warn('⚠️ Column embedding is TEXT instead of vector. Run fix-embedding-column.sql manually to fix. Existing data will be preserved only if you run it once.');
-                    } else if (embeddingType[0].udt_name === 'vector') {
-                        console.log('✅ Column embedding has correct type: vector');
+                    // Колонка существует — проверяем тип
+                    if (embeddingType[0].udt_name === 'vector') {
+                        console.log('✅ Column embedding exists with correct type: vector(768)');
+                    } else if (embeddingType[0].udt_name === 'text') {
+                        // Колонка TEXT — предупреждаем, но НЕ меняем автоматически (чтобы не потерять данные)
+                        console.warn('⚠️ Column embedding is TEXT instead of vector. Existing embeddings may be lost.');
+                        console.warn('💡 To fix: Run fix-embedding-column.sql manually (will recreate column as vector, data will be lost).');
                     }
                 } else {
-                    // Колонка не существует - создаем её как vector(768)
+                    // Колонка не существует - создаем её как vector(768) только один раз
                     const vectorExt = await sequelize.query(
                         `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
                         { type: QueryTypes.SELECT }
@@ -184,16 +185,17 @@ const startServer = async () => {
                     
                     if (vectorExt.length > 0) {
                         await sequelize.query(`
-                            ALTER TABLE analysis_history ADD COLUMN embedding vector(768);
+                            ALTER TABLE analysis_history ADD COLUMN IF NOT EXISTS embedding vector(768);
                         `);
                         console.log('✅ Column embedding created with type: vector(768)');
                     } else {
-                        console.warn('⚠️ Extension vector is not installed. Column embedding will be created as TEXT.');
+                        console.warn('⚠️ Extension vector is not installed. Cannot create embedding column.');
+                        console.warn('💡 Run: CREATE EXTENSION vector; in PostgreSQL, then restart server.');
                     }
                 }
             } catch (embeddingError: any) {
-                console.warn('⚠️ Could not check/fix embedding column type:', embeddingError.message);
-                console.log('💡 Run fix-embedding-column.sql manually to fix the column type');
+                console.warn('⚠️ Could not check/create embedding column:', embeddingError.message);
+                console.log('💡 Embedding column may need to be created manually via SQL');
             }
         } catch (syncError: any) {
             // Если ошибка связана с vector индексом - игнорируем (индекс создается вручную)
