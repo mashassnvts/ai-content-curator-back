@@ -44,6 +44,11 @@ AnalysisStageStats.init(
             type: DataTypes.INTEGER,
             allowNull: false,
         },
+        createdAt: {
+            type: DataTypes.DATE,
+            allowNull: false,
+            defaultValue: DataTypes.NOW,
+        },
     },
     {
         tableName: 'analysis_stage_stats',
