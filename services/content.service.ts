@@ -1423,13 +1423,28 @@ class ContentService {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
             
+            // Очищаем URL от параметров времени (t=26s и т.д.), которые могут вызывать проблемы
+            const cleanUrl = url.split('&t=')[0].split('#t=')[0];
+            
             // Сначала получаем информацию о доступных субтитрах
-            const infoResult = await ytdlp(url, {
-                listSubs: true,
-                skipDownload: true,
-                quiet: true,
-                noWarnings: true,
-            });
+            let infoResult;
+            try {
+                infoResult = await ytdlp(cleanUrl, {
+                    listSubs: true,
+                    skipDownload: true,
+                    quiet: true,
+                    noWarnings: true,
+                });
+            } catch (listSubsError: any) {
+                const errorMsg = listSubsError.message || '';
+                // Если ошибка "Sign in to confirm you're not a bot", пропускаем yt-dlp и возвращаем null
+                // Система попробует другие методы (Puppeteer, youtube-transcript)
+                if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                    console.log(`   ⚠️ yt-dlp blocked by YouTube (bot detection). Skipping yt-dlp, will try other methods.`);
+                    return null;
+                }
+                throw listSubsError;
+            }
             
             // Пробуем скачать автоматически сгенерированные субтитры или обычные
             // Используем временный файл для субтитров
@@ -1438,7 +1453,7 @@ class ContentService {
             
             try {
                 // Пробуем скачать автоматические субтитры (если доступны)
-                await ytdlp(url, {
+                await ytdlp(cleanUrl, {
                     writeAutoSub: true,
                     subLang: 'ru,en,uk', // Приоритет языков
                     skipDownload: true,
@@ -1484,9 +1499,16 @@ class ContentService {
                     }
                 }
             } catch (downloadError: any) {
+                const errorMsg = downloadError.message || '';
+                // Если ошибка "Sign in to confirm you're not a bot", пропускаем yt-dlp
+                if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                    console.log(`   ⚠️ yt-dlp blocked by YouTube (bot detection). Skipping yt-dlp.`);
+                    return null;
+                }
+                
                 // Если автоматические субтитры недоступны, пробуем обычные
                 try {
-                    await ytdlp(url, {
+                    await ytdlp(cleanUrl, {
                         writeSub: true,
                         subLang: 'ru,en,uk',
                         skipDownload: true,
@@ -1526,6 +1548,12 @@ class ContentService {
                         }
                     }
                 } catch (manualSubError: any) {
+                    const errorMsg = manualSubError.message || '';
+                    // Если ошибка "Sign in to confirm you're not a bot", пропускаем yt-dlp
+                    if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                        console.log(`   ⚠️ yt-dlp blocked by YouTube (bot detection). Skipping yt-dlp.`);
+                        return null;
+                    }
                     // Оба метода провалились
                     console.log(`   ⚠️ Both auto and manual subtitles unavailable via yt-dlp`);
                 }
@@ -1533,7 +1561,13 @@ class ContentService {
             
             return null;
         } catch (error: any) {
-            console.warn(`yt-dlp transcript extraction failed: ${error.message}`);
+            const errorMsg = error.message || '';
+            // Если ошибка "Sign in to confirm you're not a bot", не логируем как ошибку
+            if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                console.log(`   ⚠️ yt-dlp blocked by YouTube (bot detection). Skipping yt-dlp, will try other methods.`);
+            } else {
+                console.warn(`yt-dlp transcript extraction failed: ${errorMsg}`);
+            }
             return null;
         }
     }
@@ -1545,13 +1579,29 @@ class ContentService {
         try {
             // @ts-ignore - yt-dlp-exec types may not быть доступны
             const ytdlp = (await import('yt-dlp-exec')).default;
-            const rawResult = await ytdlp(url, {
-                dumpSingleJson: true,
-                noWarnings: true,
-                simulate: true,
-                skipDownload: true,
-                quiet: true,
-            });
+            
+            // Очищаем URL от параметров времени (t=26s и т.д.), которые могут вызывать проблемы
+            const cleanUrl = url.split('&t=')[0].split('#t=')[0];
+            
+            let rawResult;
+            try {
+                rawResult = await ytdlp(cleanUrl, {
+                    dumpSingleJson: true,
+                    noWarnings: true,
+                    simulate: true,
+                    skipDownload: true,
+                    quiet: true,
+                });
+            } catch (error: any) {
+                const errorMsg = error.message || '';
+                // Если ошибка "Sign in to confirm you're not a bot", возвращаем null
+                // Система попробует другие методы (Puppeteer)
+                if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                    console.log(`   ⚠️ yt-dlp metadata extraction blocked by YouTube (bot detection). Skipping yt-dlp, will try other methods.`);
+                    return null;
+                }
+                throw error;
+            }
 
             const parsed = typeof rawResult === 'string' ? JSON.parse(rawResult) : rawResult;
             const title = parsed?.title || parsed?.fulltitle;
@@ -1572,7 +1622,13 @@ class ContentService {
             console.log('✓ Extracted metadata via yt-dlp');
             return { content, sourceType: 'metadata' };
         } catch (error: any) {
-            console.warn(`yt-dlp metadata extraction failed: ${error.message}`);
+            const errorMsg = error.message || '';
+            // Если ошибка "Sign in to confirm you're not a bot", не логируем как ошибку
+            if (errorMsg.includes('Sign in to confirm') || errorMsg.includes('not a bot')) {
+                console.log(`   ⚠️ yt-dlp metadata extraction blocked by YouTube (bot detection). Skipping yt-dlp, will try other methods.`);
+            } else {
+                console.warn(`yt-dlp metadata extraction failed: ${errorMsg}`);
+            }
             return null;
         }
     }
