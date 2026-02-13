@@ -1,5 +1,4 @@
 import { GoogleGenAI } from '@google/genai';
-import { escapeControlCharsInJsonStrings } from '../utils/json-parse-helper';
 
 const apiKey = process.env.GEMINI_API_KEY;
 
@@ -337,8 +336,6 @@ ${userLevelsDescription}
             cleanedResponse = cleanedResponse.substring(firstBrace, lastBrace + 1);
         }
 
-        cleanedResponse = escapeControlCharsInJsonStrings(cleanedResponse);
-
         console.log('Cleaned response (first 300 chars):', cleanedResponse.substring(0, 300) + '...');
 
         let parsedResponse: RelevanceLevelResult;
@@ -569,8 +566,6 @@ ${processedContent}
         if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
             cleanedResponse = cleanedResponse.substring(firstBrace, lastBrace + 1);
         }
-
-        cleanedResponse = escapeControlCharsInJsonStrings(cleanedResponse);
 
         let parsedResponse: { results: Array<{ interest: string } & RelevanceLevelResult> };
         try {

@@ -1,6 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
-import { escapeControlCharsInJsonStrings } from '../utils/json-parse-helper';
 
 const apiKey = process.env.GEMINI_API_KEY;
 
@@ -779,9 +778,6 @@ ${feedbackContext}${ragContext}
             console.log('Cleaned response (first 300 chars):', cleanedResponse.substring(0, 300) + '...');
             console.log('Cleaned response length:', cleanedResponse.length);
         }
-        
-        // Экранируем управляющие символы (\n, \r, \t) ДО первого парсинга — AI часто возвращает неэкранированные переносы
-        cleanedResponse = escapeControlCharsInJsonStrings(cleanedResponse);
         
         let parsedResponse: AnalysisResult;
         try {

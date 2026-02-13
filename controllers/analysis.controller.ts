@@ -14,7 +14,6 @@ import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
-import { getChannelPosts } from '../services/telegram-channel.service';
 
 const MAX_URLS_LIMIT = 25;
 
@@ -23,7 +22,7 @@ const IS_DEBUG = LOG_LEVEL === 'debug';
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'completed' | 'error'; results?: any[]; error?: string }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -721,14 +720,7 @@ const runAnalysisInBackground = async (
         }
 
         const allUrls = new Set<string>();
-        const channelUrlsToExpand: string[] = [];
         for (const url of urls) {
-            // t.me/channel (без message id) — канал, получаем посты и анализируем без добавления в БД
-            const channelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)$/);
-            if (channelMatch) {
-                channelUrlsToExpand.push(url);
-                continue;
-            }
             const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
             if (playlistMatch?.[1]) {
                 try {
@@ -756,41 +748,14 @@ const runAnalysisInBackground = async (
             } else allUrls.add(url);
         }
 
-        // Для каналов: сразу показываем ожидаемое кол-во, чтобы клиент видел «Анализируется: 0 из N»
-        if (channelUrlsToExpand.length > 0) {
-            const estimatedPosts = channelUrlsToExpand.length * 6;
-            const estimatedTotal = textResults.length + allUrls.size + estimatedPosts;
-            analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults], totalExpected: estimatedTotal });
-        }
-
-        // Обрабатываем каналы: получаем 5–6 постов, добавляем их URL в очередь (без сохранения канала в БД)
-        for (const channelUrl of channelUrlsToExpand) {
-            const match = channelUrl.match(/^https?:\/\/t\.me\/([^\/]+)$/);
-            if (match) {
-                const username = match[1];
-                try {
-                    const posts = await getChannelPosts(username, 6);
-                    for (const post of posts) {
-                        if (post.url) allUrls.add(post.url);
-                    }
-                } catch (e: any) {
-                    console.warn(`⚠️ [Job ${jobId}] Failed to fetch channel @${username}:`, e.message);
-                }
-            }
-        }
-
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
-
-        const totalExpected = textResults.length + uniqueUrls.length;
-        analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults], totalExpected });
 
         const urlResults: any[] = [];
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
             const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
             urlResults.push(result);
-            analysisJobs.set(jobId, { status: 'in_progress', results: [...textResults, ...urlResults], totalExpected });
             if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) await new Promise(r => setTimeout(r, 2000));
         }
 
@@ -802,7 +767,7 @@ const runAnalysisInBackground = async (
             } catch (e) {}
         }
 
-        analysisJobs.set(jobId, { status: 'completed', results, totalExpected });
+        analysisJobs.set(jobId, { status: 'completed', results });
         console.log('✅ [Job ' + jobId + '] Analysis completed, results:', results.length);
     } catch (error: any) {
         console.error('❌ [Job ' + jobId + '] Analysis failed:', error.message);

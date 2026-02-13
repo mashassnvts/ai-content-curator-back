@@ -144,6 +144,7 @@ app.use((err: any, req: Request, res: Response, next: any) => {
 const startServer = async () => {
     let dbConnected = false;
     
+    // Пытаемся подключиться к БД и синхронизировать таблицы
     try {
         console.log('🔌 Connecting to database...');
         await sequelize.authenticate();
