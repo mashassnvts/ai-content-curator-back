@@ -14,6 +14,7 @@ import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
+import { getChannelPosts } from '../services/telegram-channel.service';
 
 const MAX_URLS_LIMIT = 25;
 
@@ -720,7 +721,14 @@ const runAnalysisInBackground = async (
         }
 
         const allUrls = new Set<string>();
+        const channelUrlsToExpand: string[] = [];
         for (const url of urls) {
+            // t.me/channel (без message id) — канал, получаем посты и анализируем без добавления в БД
+            const channelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)$/);
+            if (channelMatch) {
+                channelUrlsToExpand.push(url);
+                continue;
+            }
             const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
             if (playlistMatch?.[1]) {
                 try {
@@ -746,6 +754,22 @@ const runAnalysisInBackground = async (
                     else allUrls.add(url);
                 }
             } else allUrls.add(url);
+        }
+
+        // Обрабатываем каналы: получаем 5–6 постов, добавляем их URL в очередь (без сохранения канала в БД)
+        for (const channelUrl of channelUrlsToExpand) {
+            const match = channelUrl.match(/^https?:\/\/t\.me\/([^\/]+)$/);
+            if (match) {
+                const username = match[1];
+                try {
+                    const posts = await getChannelPosts(username, 6);
+                    for (const post of posts) {
+                        if (post.url) allUrls.add(post.url);
+                    }
+                } catch (e: any) {
+                    console.warn(`⚠️ [Job ${jobId}] Failed to fetch channel @${username}:`, e.message);
+                }
+            }
         }
 
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
