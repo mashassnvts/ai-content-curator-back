@@ -24,7 +24,7 @@ const IS_DEBUG = LOG_LEVEL === 'debug';
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls'; channelProgress?: number; currentItemIndex?: number; currentStage?: number }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls' | 'text'; channelProgress?: number; currentItemIndex?: number; currentStage?: number }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -85,11 +85,25 @@ const processTextAnalysis = async (
     interests: string, 
     feedbackHistory: UserFeedbackHistory[] = [], 
     userId?: number,
-    mode: 'read' | 'unread' = 'read'
+    mode: 'read' | 'unread' = 'read',
+    jobId?: string,
+    itemIndex?: number
 ) => {
     try {
+        // Этап 0: Загрузка текста
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+        }
+
         if (!text || text.trim().length < 20) {
             throw new Error('Текст слишком короткий для анализа. Минимум 20 символов.');
+        }
+
+        // Этап 1: AI-анализ
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
         }
 
         const analysisResult = await analyzeContentWithAI(text, interests, feedbackHistory, undefined, userId, 'article');
@@ -103,6 +117,13 @@ const processTextAnalysis = async (
                 if (IS_DEBUG) {
                     console.log(`🎯 [Semantic Tags] Extracting themes from text for user ${userId} (mode: ${mode})...`);
                 }
+                
+                // Этап 2: Извлечение тем
+                if (jobId && itemIndex != null) {
+                    const job = analysisJobs.get(jobId);
+                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+                }
+                
                 const themes = await extractThemes(text);
                 
                 if (themes.length > 0) {
@@ -119,6 +140,12 @@ const processTextAnalysis = async (
                         console.log(`✅ [Mode: read] Saved ${themes.length} semantic tags to database`);
                     } else if (mode === 'unread') {
                         // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
+                        // Этап 4: Семантическое сравнение (для видео/URL)
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                        }
+                        
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
                         semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
@@ -275,6 +302,12 @@ const processTextAnalysis = async (
             }
         }
 
+        // Этап 4: Формирование выводов (для текста)
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+        }
+        
         return {
             originalUrl: `text://${text.substring(0, 50)}...`,
             url: `text://${text.substring(0, 50)}...`,
@@ -309,7 +342,9 @@ export const processSingleUrlAnalysis = async (
     interests: string, 
     feedbackHistory: UserFeedbackHistory[] = [], 
     userId?: number,
-    mode: 'read' | 'unread' = 'read'
+    mode: 'read' | 'unread' = 'read',
+    jobId?: string,
+    itemIndex?: number
 ) => {
     // Сохраняем полный контент для использования в эмбеддинге
     let fullContentForEmbedding: string | null = null;
@@ -331,7 +366,19 @@ export const processSingleUrlAnalysis = async (
             } as any;
         }
 
+        // Этап 0: Загрузка контента
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+        }
+        
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
+        
+        // Этап 1: Извлечение транскрипта (для видео)
+        if (jobId && itemIndex != null && sourceType === 'transcript') {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
+        }
         
         // Логируем тип источника для диагностики
         if (sourceType === 'transcript') {
@@ -398,6 +445,12 @@ export const processSingleUrlAnalysis = async (
             }
         }
 
+        // Этап 2: AI-анализ
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+        }
+        
         const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType);
         
         // Обработка семантических тегов в зависимости от режима
@@ -409,6 +462,12 @@ export const processSingleUrlAnalysis = async (
                 if (IS_DEBUG) {
                     console.log(`🎯 [Semantic Tags] Extracting themes from content for user ${userId} (mode: ${mode})...`);
                 }
+                // Этап 6: Извлечение тем (раньше, чтобы показать прогресс)
+                if (jobId && itemIndex != null) {
+                    const job = analysisJobs.get(jobId);
+                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 6 });
+                }
+                
                 const themes = await extractThemes(content);
                 
                 if (themes.length > 0) {
@@ -425,6 +484,12 @@ export const processSingleUrlAnalysis = async (
                         console.log(`✅ [Mode: read] Saved ${themes.length} semantic tags to database`);
                     } else if (mode === 'unread') {
                         // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
+                        // Этап 4: Семантическое сравнение (для видео/URL)
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                        }
+                        
                         const userTagsWithWeights = await getUserTagsCached(userId);
                         
                         semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
@@ -516,6 +581,12 @@ export const processSingleUrlAnalysis = async (
 
                     if (interestsWithLevels.length > 0) {
                         try {
+                            // Этап 5: Оценка сложности
+                            if (jobId && itemIndex != null) {
+                                const job = analysisJobs.get(jobId);
+                                if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 5 });
+                            }
+                            
                             const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
                             const relevanceResults = await Promise.race([
                                 analyzeRelevanceLevelForMultipleInterests(content, interestsWithLevels),
@@ -619,6 +690,12 @@ export const processSingleUrlAnalysis = async (
                             url
                         ].filter(Boolean).join('\n\n').trim();
                         
+                        // Этап 3: Генерация эмбеддинга
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 3 });
+                        }
+                        
                         await generateAndSaveEmbedding(textForEmbedding, analysisHistoryId);
                         console.log(`✅ Generated and saved embedding for analysis_history ID: ${analysisHistoryId} (using summary + URL: ${textForEmbedding.length} chars)`);
                     } catch (embeddingError: any) {
@@ -647,6 +724,12 @@ export const processSingleUrlAnalysis = async (
             }
         }
 
+        // Этап 7: Формирование выводов
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
+        }
+        
         return {
             originalUrl: url,
             sourceType,
@@ -717,11 +800,6 @@ const runAnalysisInBackground = async (
         let feedbackHistory: UserFeedbackHistory[] = [];
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
 
-        for (const text of texts) {
-            const result = await processTextAnalysis(text, interests, feedbackHistory, userId, analysisMode);
-            textResults.push(result);
-        }
-
         const allUrls = new Set<string>();
         for (const url of urls) {
             const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
@@ -754,6 +832,39 @@ const runAnalysisInBackground = async (
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
 
+        // Если есть только текст (без URL), устанавливаем itemType: 'text'
+        if (texts.length > 0 && uniqueUrls.length === 0) {
+            analysisJobs.set(jobId, {
+                status: 'in_progress',
+                results: [],
+                totalExpected: texts.length,
+                itemType: 'text',
+                currentStage: 0
+            });
+        }
+
+        for (let i = 0; i < texts.length; i++) {
+            const text = texts[i];
+            const job = analysisJobs.get(jobId);
+            if (job && texts.length > 0) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'text', currentStage: 0 });
+            }
+            const result = await processTextAnalysis(text, interests, feedbackHistory, userId, analysisMode, jobId, i);
+            textResults.push(result);
+            // Обновляем job после обработки текста
+            if (texts.length > 0) {
+                const job = analysisJobs.get(jobId);
+                if (job) {
+                    analysisJobs.set(jobId, {
+                        status: i < texts.length - 1 ? 'in_progress' : (uniqueUrls.length > 0 ? 'in_progress' : 'completed'),
+                        results: [...textResults],
+                        totalExpected: texts.length,
+                        itemType: 'text'
+                    });
+                }
+            }
+        }
+
         const urlResults: any[] = [];
         const POSTS_TO_ANALYZE = 6;
 
@@ -782,7 +893,8 @@ const runAnalysisInBackground = async (
                     results: [...textResults, ...urlResults],
                     totalExpected: POSTS_TO_ANALYZE,
                     itemType: 'channel',
-                    channelProgress: 0
+                    channelProgress: 0,
+                    currentStage: 0 // Этап 0: Загрузка постов канала
                 });
 
                 const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
@@ -829,7 +941,8 @@ const runAnalysisInBackground = async (
                     results: [...textResults, ...urlResults],
                     totalExpected: posts.length,
                     itemType: 'channel',
-                    currentItemIndex: 0
+                    currentItemIndex: 0,
+                    currentStage: 1 // Этап 1: Анализ постов
                 });
 
                 const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
@@ -869,7 +982,9 @@ const runAnalysisInBackground = async (
                             contextForAnalysis,
                             feedbackHistory,
                             userId,
-                            'unread'
+                            'unread',
+                            jobId,
+                            j
                         );
                         if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
                             const res = analysisResult as any;
@@ -883,6 +998,31 @@ const runAnalysisInBackground = async (
                                     text: post.text || undefined
                                 });
                                 if (res.score >= 70) relevantCount++;
+                                
+                                // Создаем или обновляем результат канала с текущими постами (БЕЗ финальной рекомендации)
+                                // Блоки "Результаты анализа" и "Рекомендация" появятся только в конце
+                                const channelResult = {
+                                    originalUrl: url,
+                                    isChannel: true,
+                                    channelUsername,
+                                    channelAnalysis: {
+                                        totalPosts: posts.length,
+                                        relevantPosts: relevantCount,
+                                        posts: analyzedPosts,
+                                        recommendation: undefined // Не добавляем рекомендацию в промежуточных результатах
+                                    },
+                                    channelUrl: `https://t.me/${channelUsername}`,
+                                    isComplete: false // Флаг, что анализ еще не завершен
+                                };
+                                
+                                // Обновляем или добавляем результат канала в urlResults
+                                const existingChannelIndex = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
+                                if (existingChannelIndex >= 0) {
+                                    urlResults[existingChannelIndex] = channelResult;
+                                } else {
+                                    urlResults.push(channelResult);
+                                }
+                                
                                 analysisJobs.set(jobId, {
                                     status: 'in_progress',
                                     results: [...textResults, ...urlResults],
@@ -897,12 +1037,19 @@ const runAnalysisInBackground = async (
                     }
                 }
 
+                // Этап 4: Формирование рекомендации
+                const job = analysisJobs.get(jobId);
+                if (job) analysisJobs.set(jobId, { ...job, currentStage: 4 });
+                
                 const finalRecommendation = analyzedPosts.length === 0
                     ? (posts.length === 0 ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.' : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.')
                     : relevantCount === 0
                         ? `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%). Канал можно пропустить.`
                         : `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`;
-                urlResults.push({
+                
+                // Обновляем результат канала с финальной рекомендацией
+                const existingChannelIndex = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
+                const finalChannelResult = {
                     originalUrl: url,
                     isChannel: true,
                     channelUsername,
@@ -912,12 +1059,19 @@ const runAnalysisInBackground = async (
                         posts: analyzedPosts,
                         recommendation: finalRecommendation
                     },
-                    channelUrl: `https://t.me/${channelUsername}`
-                });
+                    channelUrl: `https://t.me/${channelUsername}`,
+                    isComplete: true // Флаг, что анализ завершен
+                };
+                
+                if (existingChannelIndex >= 0) {
+                    urlResults[existingChannelIndex] = finalChannelResult;
+                } else {
+                    urlResults.push(finalChannelResult);
+                }
             } else {
                 const job = analysisJobs.get(jobId);
-                if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length });
-                const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
+                if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length, currentStage: 0 });
+                const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode, jobId, i);
                 urlResults.push(result);
                 // Сразу обновляем job — чтобы фронтенд показывал результат, не дожидаясь остальных
                 analysisJobs.set(jobId, {
