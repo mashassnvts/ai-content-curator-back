@@ -24,7 +24,7 @@ const IS_DEBUG = LOG_LEVEL === 'debug';
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls' }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls'; channelProgress?: number; currentItemIndex?: number; currentStage?: number }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -777,12 +777,12 @@ const runAnalysisInBackground = async (
                 const channelUsername = telegramChannelMatch[1].replace('@', '').trim();
                 if (!channelUsername) continue;
 
-                // Сразу показываем прогресс "0 из 6 постов" — чтобы пользователь видел, что идёт загрузка
                 analysisJobs.set(jobId, {
                     status: 'in_progress',
                     results: [...textResults, ...urlResults],
                     totalExpected: POSTS_TO_ANALYZE,
-                    itemType: 'channel'
+                    itemType: 'channel',
+                    channelProgress: 0
                 });
 
                 const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
@@ -828,7 +828,8 @@ const runAnalysisInBackground = async (
                     status: 'in_progress',
                     results: [...textResults, ...urlResults],
                     totalExpected: posts.length,
-                    itemType: 'channel'
+                    itemType: 'channel',
+                    currentItemIndex: 0
                 });
 
                 const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
@@ -860,6 +861,8 @@ const runAnalysisInBackground = async (
                 for (let j = 0; j < posts.length; j++) {
                     const post = posts[j];
                     if (!post.url) continue;
+                    const job = analysisJobs.get(jobId);
+                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: j, currentStage: 0 });
                     try {
                         const analysisResult = await processSingleUrlAnalysis(
                             post.url,
@@ -880,33 +883,12 @@ const runAnalysisInBackground = async (
                                     text: post.text || undefined
                                 });
                                 if (res.score >= 70) relevantCount++;
-                                // Не дублируем: только сводка канала (появляется по мере анализа)
-                                const partialRecommendation = analyzedPosts.length < posts.length
-                                    ? `Обработано ${analyzedPosts.length} из ${posts.length} постов...`
-                                    : (relevantCount === 0
-                                        ? `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%).`
-                                        : `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`);
-                                const partialChannelSummary = {
-                                    originalUrl: url,
-                                    isChannel: true,
-                                    channelUsername,
-                                    channelAnalysis: {
-                                        totalPosts: analyzedPosts.length,
-                                        relevantPosts: relevantCount,
-                                        posts: [...analyzedPosts],
-                                        recommendation: partialRecommendation
-                                    },
-                                    channelUrl: `https://t.me/${channelUsername}`
-                                };
-                                // Заменяем предыдущую сводку канала на обновлённую
-                                const prevChannelIdx = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
-                                if (prevChannelIdx >= 0) urlResults[prevChannelIdx] = partialChannelSummary;
-                                else urlResults.push(partialChannelSummary);
                                 analysisJobs.set(jobId, {
                                     status: 'in_progress',
                                     results: [...textResults, ...urlResults],
                                     totalExpected: posts.length,
-                                    itemType: 'channel'
+                                    itemType: 'channel',
+                                    channelProgress: analyzedPosts.length
                                 });
                             }
                         }
@@ -915,23 +897,26 @@ const runAnalysisInBackground = async (
                     }
                 }
 
-                // Финальная сводка уже в urlResults (обновлялась в цикле), обновляем recommendation
                 const finalRecommendation = analyzedPosts.length === 0
                     ? (posts.length === 0 ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.' : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов.')
                     : relevantCount === 0
                         ? `Проанализировано ${analyzedPosts.length} постов. Ни один не совпадает с вашими интересами (порог 70%). Канал можно пропустить.`
                         : `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Канал стоит читать!`;
-                const channelIdx = urlResults.findIndex((r: any) => r.isChannel && r.channelUsername === channelUsername);
-                if (channelIdx >= 0) {
-                    urlResults[channelIdx] = {
-                        ...urlResults[channelIdx],
-                        channelAnalysis: {
-                            ...urlResults[channelIdx].channelAnalysis,
-                            recommendation: finalRecommendation
-                        }
-                    };
-                }
+                urlResults.push({
+                    originalUrl: url,
+                    isChannel: true,
+                    channelUsername,
+                    channelAnalysis: {
+                        totalPosts: analyzedPosts.length,
+                        relevantPosts: relevantCount,
+                        posts: analyzedPosts,
+                        recommendation: finalRecommendation
+                    },
+                    channelUrl: `https://t.me/${channelUsername}`
+                });
             } else {
+                const job = analysisJobs.get(jobId);
+                if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length });
                 const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
                 urlResults.push(result);
                 // Сразу обновляем job — чтобы фронтенд показывал результат, не дожидаясь остальных
