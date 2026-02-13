@@ -667,14 +667,6 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
         return res;
     }
     
-    // Отправляем заголовки СРАЗУ, чтобы Railway не закрыл соединение по таймауту
-    // Railway закрывает соединения без активности через ~30-60 секунд
-    if (!res.headersSent) {
-        res.setHeader('Connection', 'keep-alive');
-        res.setHeader('X-Accel-Buffering', 'no'); // Отключаем буферизацию для Railway
-        // Content-Type установим при отправке ответа через res.json()
-    }
-    
     try {
         const { urls: urlInput, interests, mode } = req.body;
         const userId = (req as AuthenticatedRequest).user?.userId;
@@ -940,7 +932,7 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
                 return res;
             }
             
-            // Отправляем JSON ответ (Express автоматически установит Content-Type)
+            // Отправляем JSON ответ стандартным способом
             res.json(results);
             console.log('✅ Response sent successfully');
         } catch (sendError: any) {
