@@ -31,23 +31,28 @@ AnalysisStageStats.init(
         stageId: {
             type: DataTypes.INTEGER,
             allowNull: false,
+            field: 'stage_id', // Маппинг на snake_case колонку в БД
         },
         stageName: {
             type: DataTypes.STRING,
             allowNull: false,
+            field: 'stage_name', // Маппинг на snake_case колонку в БД
         },
         itemType: {
             type: DataTypes.ENUM('channel', 'urls', 'text'),
             allowNull: false,
+            field: 'item_type', // Маппинг на snake_case колонку в БД
         },
         durationMs: {
             type: DataTypes.INTEGER,
             allowNull: false,
+            field: 'duration_ms', // Маппинг на snake_case колонку в БД
         },
         createdAt: {
             type: DataTypes.DATE,
             allowNull: false,
             defaultValue: DataTypes.NOW,
+            field: 'created_at', // Маппинг на snake_case колонку в БД
         },
     },
     {
@@ -55,9 +60,10 @@ AnalysisStageStats.init(
         sequelize,
         timestamps: true,
         updatedAt: false, // Только createdAt
+        underscored: true, // Использовать snake_case для автоматического маппинга
         indexes: [
-            { fields: ['stageId', 'itemType'] },
-            { fields: ['createdAt'] },
+            { fields: ['stage_id', 'item_type'] }, // Используем snake_case для индексов
+            { fields: ['created_at'] },
         ],
     }
 );
