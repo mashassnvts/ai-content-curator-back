@@ -766,6 +766,13 @@ const runAnalysisInBackground = async (
                 const channelUsername = telegramChannelMatch[1].replace('@', '').trim();
                 if (!channelUsername) continue;
 
+                // Сразу показываем прогресс "0 из 6" — чтобы пользователь видел, что идёт загрузка
+                analysisJobs.set(jobId, {
+                    status: 'in_progress',
+                    results: [...textResults, ...urlResults],
+                    totalExpected: POSTS_TO_ANALYZE
+                });
+
                 const fetchLimit = Math.max(POSTS_TO_ANALYZE + 5, 15);
                 let allFetched: Array<{ messageId: number; text: string; url: string | null; date: Date }> = [];
                 try {

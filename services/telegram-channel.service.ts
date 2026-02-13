@@ -115,7 +115,7 @@ export async function getChannelPosts(
                 browser = await puppeteer.launch({
                     headless: true,
                     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-                    protocolTimeout: 120000 // Увеличиваем таймаут протокола до 2 минут
+                    protocolTimeout: 300000 // 5 минут — для Railway/контейнеров Chrome может запускаться медленно
                 });
 
                 const page = await browser.newPage();
