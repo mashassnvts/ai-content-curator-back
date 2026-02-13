@@ -151,7 +151,7 @@ const startServer = async () => {
         console.log('✅ Database connection established successfully.');
         
         console.log('📊 Synchronizing database models...');
-        // Используем alter: false — иначе Sequelize УДАЛЯЕТ колонку embedding при sync (её нет в модели).
+            // Используем alter: false — иначе Sequelize УДАЛЯЕТ колонку embedding при sync (её нет в модели).
         // DROP column при каждом рестарте = потеря всех эмбеддингов. alter: false сохраняет колонку.
         // Колонка embedding создаётся вручную ниже, если её ещё нет.
         try {

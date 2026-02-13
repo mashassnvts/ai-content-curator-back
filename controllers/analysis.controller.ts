@@ -1,4 +1,5 @@
 import { Response } from 'express';
+import crypto from 'crypto';
 import contentService from '../services/content.service';
 import { analyzeContent as analyzeContentWithAI, UserFeedbackHistory } from '../services/ai.service'; 
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
@@ -18,6 +19,10 @@ const MAX_URLS_LIMIT = 25;
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
+
+// Хранилище асинхронных задач анализа (jobId -> { status, results?, error? })
+// Используется для обхода таймаута Railway на длительных запросах
+const analysisJobs = new Map<string, { status: 'pending' | 'completed' | 'error'; results?: any[]; error?: string }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -660,8 +665,117 @@ export const processSingleUrlAnalysis = async (
     }
 };
 
+/**
+ * Получить статус асинхронной задачи анализа
+ */
+export const getAnalysisStatus = async (req: Request, res: Response): Promise<Response> => {
+    const { jobId } = req.params;
+    if (!jobId) {
+        return res.status(400).json({ message: 'jobId is required' });
+    }
+    const job = analysisJobs.get(jobId);
+    if (!job) {
+        return res.status(404).json({ message: 'Job not found', status: 'not_found' });
+    }
+    return res.json(job);
+};
+
+const runAnalysisInBackground = async (
+    jobId: string,
+    urlInput: string | string[],
+    interests: string,
+    analysisMode: 'read' | 'unread',
+    userId?: number
+) => {
+    try {
+        const inputString = Array.isArray(urlInput) ? urlInput.join('\n') : String(urlInput);
+        const urls: string[] = [];
+        const texts: string[] = [];
+        const lines = inputString.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+
+        if (lines.length === 1) {
+            const trimmedInput = lines[0].trim();
+            if (isValidUrl(trimmedInput)) urls.push(trimmedInput);
+            else texts.push(trimmedInput);
+        } else {
+            const nonUrlParts: string[] = [];
+            let foundValidUrls = 0;
+            for (const line of lines) {
+                if (isValidUrl(line)) {
+                    urls.push(line);
+                    foundValidUrls++;
+                } else if (line.length > 0) nonUrlParts.push(line);
+            }
+            if (foundValidUrls === 0) texts.push(inputString);
+            else if (nonUrlParts.length > 0) texts.push(nonUrlParts.join('\n\n'));
+        }
+
+        const textResults: any[] = [];
+        let feedbackHistory: UserFeedbackHistory[] = [];
+        if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
+
+        for (const text of texts) {
+            const result = await processTextAnalysis(text, interests, feedbackHistory, userId, analysisMode);
+            textResults.push(result);
+        }
+
+        const allUrls = new Set<string>();
+        for (const url of urls) {
+            const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+            if (playlistMatch?.[1]) {
+                try {
+                    let playlist;
+                    try {
+                        playlist = await ytpl(url, { limit: MAX_URLS_LIMIT });
+                    } catch {
+                        playlist = await ytpl(playlistMatch[1], { limit: MAX_URLS_LIMIT });
+                    }
+                    if (playlist?.items?.length) {
+                        playlist.items.forEach((item: any) => {
+                            const videoUrl = item.shortUrl || item.url || (item.id ? `https://www.youtube.com/watch?v=${item.id}` : null);
+                            if (videoUrl) allUrls.add(videoUrl);
+                        });
+                    } else {
+                        const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
+                        if (videoMatch?.[1]) allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
+                        else allUrls.add(url);
+                    }
+                } catch {
+                    const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
+                    if (videoMatch?.[1]) allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
+                    else allUrls.add(url);
+                }
+            } else allUrls.add(url);
+        }
+
+        const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
+        if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
+
+        const urlResults: any[] = [];
+        for (let i = 0; i < uniqueUrls.length; i++) {
+            const url = uniqueUrls[i];
+            const result = await processSingleUrlAnalysis(url, interests, feedbackHistory, userId, analysisMode);
+            urlResults.push(result);
+            if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) await new Promise(r => setTimeout(r, 2000));
+        }
+
+        const results = [...textResults, ...urlResults];
+        const finalInterests = interests;
+        if (userId) {
+            try {
+                await historyCleanupService.updateInterestUsage(userId, finalInterests.split(',').map((i: string) => i.trim()));
+            } catch (e) {}
+        }
+
+        analysisJobs.set(jobId, { status: 'completed', results });
+        console.log('✅ [Job ' + jobId + '] Analysis completed, results:', results.length);
+    } catch (error: any) {
+        console.error('❌ [Job ' + jobId + '] Analysis failed:', error.message);
+        analysisJobs.set(jobId, { status: 'error', error: error.message || 'Analysis failed' });
+    }
+};
+
 const handleAnalysisRequest = async (req: Request, res: Response): Promise<Response> => {
-    // Проверяем, не закрыто ли соединение в начале запроса
     if (res.writableEnded || res.destroyed || !res.writable) {
         console.warn('⚠️ Connection already closed at request start');
         return res;
@@ -697,254 +811,15 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
             return res.status(400).json({ message: 'URLs/text and interests are required.' });
         }
 
-        // Преобразуем ввод в строку для обработки
-        const inputString = Array.isArray(urlInput) ? urlInput.join('\n') : String(urlInput);
+        // Асинхронный режим: возвращаем jobId сразу, анализ в фоне (обход таймаута Railway)
+        const jobId = crypto.randomUUID();
+        analysisJobs.set(jobId, { status: 'pending' });
+        setImmediate(() => runAnalysisInBackground(jobId, urlInput, interests, analysisMode, userId));
         
-        // Объявляем переменные для URL и текстов
-        const urls: string[] = [];
-        const texts: string[] = [];
+        // Удаляем задачу через 1 час (очистка памяти)
+        setTimeout(() => analysisJobs.delete(jobId), 3600000);
         
-        // Улучшенная логика парсинга: сначала разбиваем по строкам, потом проверяем каждый элемент
-        const lines = inputString.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
-        
-        // Если только одна строка - проверяем, это URL или текст
-        if (lines.length === 1) {
-            const trimmedInput = lines[0].trim();
-            if (isValidUrl(trimmedInput)) {
-                urls.push(trimmedInput);
-                console.log(`📊 Detected single URL input`);
-            } else {
-                texts.push(trimmedInput);
-                console.log(`📊 Detected single text input (${trimmedInput.length} chars)`);
-            }
-        } else {
-            // Несколько строк - проверяем каждую отдельно
-            const nonUrlParts: string[] = [];
-            let foundValidUrls = 0;
-            
-            for (const line of lines) {
-                if (isValidUrl(line)) {
-                    urls.push(line);
-                    foundValidUrls++;
-                    if (IS_DEBUG) {
-                        console.log(`📊 Detected URL: ${line.substring(0, 50)}...`);
-                    }
-                } else if (line.length > 0) {
-                    // Не пустая строка, но не URL - добавляем в тексты
-                    nonUrlParts.push(line);
-                }
-            }
-            
-            // Если найдены URL - обрабатываем их отдельно
-            // Если не найдено ни одного URL - это весь текст с абзацами
-            if (foundValidUrls === 0) {
-                // Нет URL-ов - это весь текст с абзацами, используем оригинальный текст целиком
-                texts.push(inputString);
-                console.log(`📊 Detected text input with ${lines.length} lines - processing as single text (${inputString.length} chars)`);
-            } else {
-                // Есть валидные URL-ы - обрабатываем их отдельно
-                // Остальное (если есть) объединяем в тексты
-                if (nonUrlParts.length > 0) {
-                    const combinedText = nonUrlParts.join('\n\n');
-                    if (combinedText.length > 0) {
-                        texts.push(combinedText);
-                    }
-                }
-                console.log(`📊 Detected ${urls.length} URL(s) and ${texts.length} text input(s)`);
-            }
-        }
-
-        // Обрабатываем тексты
-        const textResults: any[] = [];
-        if (texts.length > 0) {
-            console.log(`📝 Processing ${texts.length} text input(s)...`);
-            let feedbackHistory: UserFeedbackHistory[] = [];
-            if (userId) {
-                feedbackHistory = await UserService.getUserFeedbackHistory(userId);
-                if (IS_DEBUG) {
-                    console.log('📋 Loaded feedback history length:', feedbackHistory.length);
-                }
-            }
-            
-            for (let i = 0; i < texts.length; i++) {
-                const text = texts[i];
-                console.log(`📝 [${i + 1}/${texts.length}] Analyzing text (${text.length} chars) (mode: ${analysisMode})`);
-                if (IS_DEBUG) {
-                    console.log(`   Interests: ${interests}`);
-                }
-                const result = await processTextAnalysis(text, interests, feedbackHistory, userId, analysisMode);
-                textResults.push(result);
-            }
-        }
-
-        // Раскрываем плейлисты и объединяем все URL
-        const allUrls = new Set<string>();
-        for (const url of urls) {
-            // Проверяем, является ли URL плейлистом YouTube
-            const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
-            if (playlistMatch && playlistMatch[1]) {
-                try {
-                    const playlistId = playlistMatch[1];
-                    console.log(`📹 Обнаружен плейлист YouTube, извлекаем видео...`);
-                    console.log(`   Playlist ID: ${playlistId}`);
-                    console.log(`   Full URL: ${url}`);
-                    
-                    // Пробуем использовать полный URL, если не работает - используем только ID
-                    let playlist;
-                    try {
-                        playlist = await ytpl(url, { limit: MAX_URLS_LIMIT });
-                    } catch (urlError: any) {
-                        console.log(`   Попытка с полным URL не удалась, пробуем только ID...`);
-                        playlist = await ytpl(playlistId, { limit: MAX_URLS_LIMIT });
-                    }
-                    
-                    if (playlist && playlist.items && playlist.items.length > 0) {
-                    console.log(`✅ Извлечено ${playlist.items.length} видео из плейлиста.`);
-                        console.log(`   Каждое видео будет обработано отдельно...`);
-                        playlist.items.forEach((item: any, index: number) => {
-                            let videoUrl: string | null = null;
-                            if (item.shortUrl) {
-                                videoUrl = item.shortUrl;
-                            } else if (item.url) {
-                                videoUrl = item.url;
-                            } else if (item.id) {
-                                videoUrl = `https://www.youtube.com/watch?v=${item.id}`;
-                            }
-                            
-                            if (videoUrl) {
-                                allUrls.add(videoUrl);
-                                console.log(`   ${index + 1}. ${videoUrl}`);
-                            }
-                        });
-                        console.log(`   Всего будет обработано ${playlist.items.length} видео из плейлиста.`);
-                    } else {
-                        console.warn(`⚠️ Плейлист пуст или не содержит видео.`);
-                        // Если плейлист пуст, пробуем обработать как обычное видео
-                        const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
-                        if (videoMatch && videoMatch[1]) {
-                            allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
-                        } else {
-                            allUrls.add(url);
-                        }
-                    }
-                } catch (error: any) {
-                    console.error(`❌ Не удалось обработать плейлист ${url}: ${error.message}`);
-                    console.error(`   Stack: ${error.stack}`);
-                    // Если не удалось обработать плейлист, пробуем обработать как обычное видео
-                    const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
-                    if (videoMatch && videoMatch[1]) {
-                        console.log(`   Обрабатываем как обычное видео: ${videoMatch[1]}`);
-                        allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
-                    } else {
-                    allUrls.add(url);
-                    }
-                }
-            } else {
-                allUrls.add(url);
-            }
-        }
-
-        const uniqueUrls = Array.from(allUrls);
-
-        if (uniqueUrls.length > MAX_URLS_LIMIT) {
-            console.warn(`Превышен лимит URL (${uniqueUrls.length}). Обрабатываются первые ${MAX_URLS_LIMIT}.`);
-            uniqueUrls.length = MAX_URLS_LIMIT;
-        }
-        
-        // ВАЖНО: Используем ТОЛЬКО переданные интересы, без смешивания
-        const finalInterests = interests;
-        if (IS_DEBUG) {
-            console.log('🎯 FINAL INTERESTS FOR ANALYSIS:', finalInterests);
-        }
-
-        let feedbackHistory: UserFeedbackHistory[] = [];
-        if (userId) {
-            feedbackHistory = await UserService.getUserFeedbackHistory(userId);
-            if (IS_DEBUG) {
-                console.log('📋 Loaded feedback history length:', feedbackHistory.length);
-            }
-        }
-
-        const urlResults: any[] = [];
-        
-        if (uniqueUrls.length > 0) {
-            console.log(`📋 Всего URL для обработки: ${uniqueUrls.length}`);
-            if (uniqueUrls.length > 1) {
-                console.log(`   Это плейлист или несколько ссылок - каждое видео будет обработано отдельно.`);
-            }
-            
-            for (let i = 0; i < uniqueUrls.length; i++) {
-                const url = uniqueUrls[i];
-                console.log(`🔍 [${i + 1}/${uniqueUrls.length}] Analyzing URL: ${url} (mode: ${analysisMode})`);
-                if (IS_DEBUG) {
-                    console.log(`   Interests: ${finalInterests}`);
-                }
-                const result = await processSingleUrlAnalysis(url, finalInterests, feedbackHistory, userId, analysisMode);
-                urlResults.push(result);
-                
-                // Небольшая задержка между обработкой видео из плейлиста, чтобы не перегружать сервисы
-                if (uniqueUrls.length > 1 && i < uniqueUrls.length - 1) {
-                    console.log(`   ⏳ Waiting 2 seconds before next video...`);
-                    await new Promise(res => setTimeout(res, 2000));
-                }
-            }
-            
-            console.log(`✅ Все ${uniqueUrls.length} URL обработаны.`);
-        }
-
-        // Объединяем результаты текстов и URL
-        const results = [...textResults, ...urlResults];
-
-        // Примечание: сохранение истории и эмбеддингов для URL происходит внутри processSingleUrlAnalysis
-        // Для текстов сохранение происходит внутри processTextAnalysis
-        // Здесь мы только обновляем lastUsedAt для интересов
-        if (userId) {
-            try {
-                await historyCleanupService.updateInterestUsage(userId, finalInterests.split(',').map((i: string) => i.trim()));
-            } catch (error: any) {
-                console.warn(`⚠️ Failed to update interest usage: ${error.message}`);
-            }
-        }
-
-        // Логируем финальные результаты
-        console.log('✅ ANALYSIS COMPLETED. Results:', results.map(r => ({
-            url: r.originalUrl,
-            verdict: r.verdict,
-            score: r.score
-        })));
-
-        // Проверяем, не закрыто ли соединение перед отправкой ответа
-        if (res.headersSent) {
-            console.warn('⚠️ Response headers already sent, skipping response');
-            return res;
-        }
-        
-        if (res.writableEnded || res.destroyed || !res.writable) {
-            console.warn('⚠️ Response stream already ended or destroyed, cannot send response');
-            return res;
-        }
-        
-        // Отправляем ответ немедленно после завершения анализа
-        try {
-            // Финальная проверка соединения перед отправкой
-            if (res.writableEnded || res.destroyed || !res.writable) {
-                console.warn('⚠️ Connection closed before sending response body (final check)');
-                return res;
-            }
-            
-            // Отправляем JSON ответ стандартным способом
-            res.json(results);
-            console.log('✅ Response sent successfully');
-        } catch (sendError: any) {
-            // Обрабатываем ошибки отправки (например, ECONNRESET, EPIPE)
-            if (sendError.code === 'ECONNRESET' || sendError.code === 'EPIPE' || sendError.message?.includes('write after end')) {
-                console.warn('⚠️ Connection closed during response send:', sendError.code);
-            } else {
-                console.error('❌ Failed to send response:', sendError.message);
-            }
-        }
-        
-        return res;
+        return res.status(202).json({ jobId, message: 'Analysis started. Poll GET /api/analysis/status/:jobId for results.' });
 
     } catch (error) {
         console.error('❌ Error in handleAnalysisRequest:', error);
