@@ -44,14 +44,28 @@ const stageStartTimes = new Map<string, Map<number, number>>();
  */
 const recordStageStats = async (stageId: number, stageName: string, itemType: 'channel' | 'urls' | 'text', durationMs: number) => {
     try {
-        await AnalysisStageStats.create({
+        if (!itemType) {
+            console.warn(`⚠️ Cannot record stage stats: itemType is undefined (stageId: ${stageId})`);
+            return;
+        }
+        
+        const result = await AnalysisStageStats.create({
             stageId,
             stageName,
             itemType,
             durationMs,
         });
+        
+        console.log(`📊 [Stage Stats] Recorded: stageId=${stageId}, stageName="${stageName}", itemType="${itemType}", durationMs=${durationMs}ms`);
     } catch (error: any) {
-        console.warn(`⚠️ Failed to record stage stats: ${error.message}`);
+        console.error(`❌ Failed to record stage stats:`, {
+            error: error.message,
+            stack: error.stack,
+            stageId,
+            stageName,
+            itemType,
+            durationMs
+        });
     }
 };
 
@@ -69,18 +83,42 @@ const startStageTracking = (jobId: string, stageId: number) => {
 /**
  * Завершает отслеживание этапа и записывает статистику
  */
-const endStageTracking = async (jobId: string, stageId: number, itemType: 'channel' | 'urls' | 'text') => {
-    const jobStages = stageStartTimes.get(jobId);
-    if (!jobStages) return;
-    
-    const startTime = jobStages.get(stageId);
-    if (!startTime) return;
-    
-    const durationMs = Date.now() - startTime;
-    const stageName = STAGE_NAMES[stageId] || `Этап ${stageId}`;
-    
-    await recordStageStats(stageId, stageName, itemType, durationMs);
-    jobStages.delete(stageId);
+const endStageTracking = async (jobId: string, stageId: number, itemType: 'channel' | 'urls' | 'text' | undefined) => {
+    try {
+        // Если itemType не передан, пытаемся получить его из job
+        let finalItemType = itemType;
+        if (!finalItemType) {
+            const job = analysisJobs.get(jobId);
+            finalItemType = job?.itemType || 'urls'; // По умолчанию 'urls'
+            console.log(`ℹ️ [Stage Stats] itemType not provided, using from job: ${finalItemType}`);
+        }
+        
+        const jobStages = stageStartTimes.get(jobId);
+        if (!jobStages) {
+            console.warn(`⚠️ [Stage Stats] No job stages found for jobId: ${jobId}, stageId: ${stageId}`);
+            return;
+        }
+        
+        const startTime = jobStages.get(stageId);
+        if (!startTime) {
+            console.warn(`⚠️ [Stage Stats] No start time found for jobId: ${jobId}, stageId: ${stageId}`);
+            return;
+        }
+        
+        const durationMs = Date.now() - startTime;
+        const stageName = STAGE_NAMES[stageId] || `Этап ${stageId}`;
+        
+        await recordStageStats(stageId, stageName, finalItemType, durationMs);
+        jobStages.delete(stageId);
+    } catch (error: any) {
+        console.error(`❌ [Stage Stats] Error in endStageTracking:`, {
+            error: error.message,
+            stack: error.stack,
+            jobId,
+            stageId,
+            itemType
+        });
+    }
 };
 
 // Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
@@ -154,20 +192,42 @@ const processTextAnalysis = async (
         // Этап 0: Загрузка текста
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+            const itemType = job?.itemType || 'text';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
+                startStageTracking(jobId, 0);
+            }
         }
 
         if (!text || text.trim().length < 20) {
             throw new Error('Текст слишком короткий для анализа. Минимум 20 символов.');
         }
+        
+        // Завершаем этап 0
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'text';
+            await endStageTracking(jobId, 0, itemType);
+        }
 
         // Этап 1: AI-анализ
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
+            const itemType = job?.itemType || 'text';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
+                startStageTracking(jobId, 1);
+            }
         }
 
         const analysisResult = await analyzeContentWithAI(text, interests, feedbackHistory, undefined, userId, 'article');
+        
+        // Завершаем этап 1
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'text';
+            await endStageTracking(jobId, 1, itemType);
+        }
         
         // Обработка семантических тегов в зависимости от режима
         let semanticComparisonResult = null;
@@ -182,10 +242,21 @@ const processTextAnalysis = async (
                 // Этап 2: Извлечение тем
                 if (jobId && itemIndex != null) {
                     const job = analysisJobs.get(jobId);
-                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+                    const itemType = job?.itemType || 'text';
+                    if (job) {
+                        analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
+                        startStageTracking(jobId, 2);
+                    }
                 }
                 
                 const themes = await extractThemes(text);
+                
+                // Завершаем этап 2
+                if (jobId && itemIndex != null) {
+                    const job = analysisJobs.get(jobId);
+                    const itemType = job?.itemType || 'text';
+                    await endStageTracking(jobId, 2, itemType);
+                }
                 
                 if (themes.length > 0) {
                     if (IS_DEBUG) {
@@ -379,7 +450,20 @@ const processTextAnalysis = async (
         // Этап 4: Формирование выводов (для текста)
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+            const itemType = job?.itemType || 'text';
+            if (job) {
+                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
+                startStageTracking(jobId, 4);
+            }
+        }
+        
+        // Завершаем этап 4
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            const itemType = job?.itemType || 'text';
+            setTimeout(async () => {
+                await endStageTracking(jobId, 4, itemType);
+            }, 100);
         }
         
         return {

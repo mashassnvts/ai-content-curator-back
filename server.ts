@@ -249,6 +249,54 @@ const startServer = async () => {
         const tables = await sequelize.getQueryInterface().showAllTables();
         console.log(`📋 Found ${tables.length} table(s) in database:`, tables);
         
+        // Проверяем и создаем таблицу analysis_stage_stats если её нет
+        const hasStageStatsTable = tables.includes('analysis_stage_stats');
+        if (!hasStageStatsTable) {
+            console.log('📊 Creating analysis_stage_stats table...');
+            try {
+                await sequelize.query(`
+                    CREATE TABLE IF NOT EXISTS analysis_stage_stats (
+                        id SERIAL PRIMARY KEY,
+                        stage_id INT NOT NULL,
+                        stage_name VARCHAR(255) NOT NULL,
+                        item_type VARCHAR(20) NOT NULL CHECK (item_type IN ('channel', 'urls', 'text')),
+                        duration_ms INT NOT NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_analysis_stage_stats_stage_item ON analysis_stage_stats(stage_id, item_type);
+                    CREATE INDEX IF NOT EXISTS idx_analysis_stage_stats_created ON analysis_stage_stats(created_at);
+                `);
+                console.log('✅ Table analysis_stage_stats created successfully');
+            } catch (createError: any) {
+                console.error('❌ Failed to create analysis_stage_stats table:', createError.message);
+                console.warn('💡 Please run the migration script manually: add-analysis-stage-stats.sql');
+            }
+        } else {
+            console.log('✅ Table analysis_stage_stats exists');
+        }
+        
+        // Проверяем и добавляем колонку original_text в analysis_history если её нет
+        try {
+            const columns = await sequelize.query(
+                `SELECT column_name FROM information_schema.columns 
+                 WHERE table_name = 'analysis_history' AND column_name = 'original_text'`,
+                { type: QueryTypes.SELECT }
+            ) as any[];
+            
+            if (columns.length === 0) {
+                console.log('📊 Adding original_text column to analysis_history...');
+                await sequelize.query(`
+                    ALTER TABLE analysis_history ADD COLUMN IF NOT EXISTS original_text TEXT;
+                `);
+                console.log('✅ Column original_text added to analysis_history');
+            } else {
+                console.log('✅ Column original_text exists in analysis_history');
+            }
+        } catch (columnError: any) {
+            console.warn('⚠️ Could not check/add original_text column:', columnError.message);
+        }
+        
         dbConnected = true;
     } catch (error: any) {
         console.error('❌ Database connection/sync error:', error.message);
