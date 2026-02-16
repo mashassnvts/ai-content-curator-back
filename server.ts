@@ -259,7 +259,7 @@ const startServer = async () => {
                         id SERIAL PRIMARY KEY,
                         stage_id INT NOT NULL,
                         stage_name VARCHAR(255) NOT NULL,
-                        item_type VARCHAR(20) NOT NULL CHECK (item_type IN ('channel', 'urls', 'text')),
+                        item_type VARCHAR(20) NOT NULL CHECK (item_type IN ('channel', 'urls', 'text', 'article', 'video')),
                         duration_ms INT NOT NULL,
                         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                     );
@@ -267,6 +267,18 @@ const startServer = async () => {
                     CREATE INDEX IF NOT EXISTS idx_analysis_stage_stats_stage_item ON analysis_stage_stats(stage_id, item_type);
                     CREATE INDEX IF NOT EXISTS idx_analysis_stage_stats_created ON analysis_stage_stats(created_at);
                 `);
+                
+                // Обновляем CHECK constraint если таблица уже существует
+                try {
+                    await sequelize.query(`
+                        ALTER TABLE analysis_stage_stats DROP CONSTRAINT IF EXISTS analysis_stage_stats_item_type_check;
+                        ALTER TABLE analysis_stage_stats ADD CONSTRAINT analysis_stage_stats_item_type_check 
+                            CHECK (item_type IN ('channel', 'urls', 'text', 'article', 'video'));
+                    `);
+                } catch (constraintError: any) {
+                    // Игнорируем ошибки обновления constraint (может не существовать или уже обновлен)
+                    console.log('ℹ️ Could not update constraint (may already be updated):', constraintError.message);
+                }
                 console.log('✅ Table analysis_stage_stats created successfully');
             } catch (createError: any) {
                 console.error('❌ Failed to create analysis_stage_stats table:', createError.message);

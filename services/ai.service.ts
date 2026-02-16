@@ -1147,3 +1147,60 @@ ${feedbackContext}${ragContext}
         throw new Error(`Ошибка при анализе контента AI-сервисом: ${error.message}`);
     }
 };
+
+/** Максимальная длина контента для Q&A (чтобы не превысить лимиты токенов) */
+const MAX_CONTENT_LENGTH_QA = 100000;
+
+/**
+ * Отвечает на вопрос пользователя на основе контента (транскрипт видео, текст статьи и т.д.)
+ * @param content - Полный контент (транскрипт, текст статьи)
+ * @param question - Вопрос пользователя
+ * @returns Ответ AI на вопрос
+ */
+export async function answerQuestionAboutContent(content: string, question: string): Promise<string> {
+    if (!content || !question) {
+        throw new Error('Контент и вопрос обязательны');
+    }
+
+    const truncatedContent = content.length > MAX_CONTENT_LENGTH_QA
+        ? content.substring(0, MAX_CONTENT_LENGTH_QA) + '\n\n[... контент обрезан из-за длины ...]'
+        : content;
+
+    const systemInstruction = `Ты — помощник, который отвечает на вопросы пользователя на основе предоставленного контента (транскрипт видео, текст статьи и т.д.).
+
+ПРАВИЛА:
+- Отвечай ТОЛЬКО на основе предоставленного контента. Не добавляй информацию извне.
+- Если в контенте нет ответа на вопрос — честно скажи об этом.
+- Отвечай кратко и по существу, на русском языке.
+- Не используй markdown в ответе.
+- Если вопрос касается наличия информации в контенте (например "есть ли в видео ответ на X?") — дай чёткий ответ: да/нет и краткое объяснение.`;
+
+    const userPrompt = `КОНТЕНТ:
+${truncatedContent}
+
+---
+ВОПРОС ПОЛЬЗОВАТЕЛЯ: ${question}
+
+ОТВЕТ:`;
+
+    const result = await generateCompletionWithRetry('gemini-2.5-flash', systemInstruction, userPrompt);
+
+    let rawResponse: string = '';
+    if (result?.text) {
+        rawResponse = result.text;
+    } else if (result?.response?.text) {
+        rawResponse = typeof result.response.text === 'function' ? result.response.text() : String(result.response.text || '');
+    } else if (typeof result === 'string') {
+        rawResponse = result;
+    } else if (result?.candidates?.[0]?.content?.parts?.[0]?.text) {
+        rawResponse = result.candidates[0].content.parts[0].text;
+    } else if (result?.candidates?.[0]?.content?.parts?.[0]) {
+        const part = result.candidates[0].content.parts[0];
+        rawResponse = part.text ?? part.inlineData ?? '';
+    } else {
+        console.error('❌ [Q&A] AI response has unexpected structure:', result ? Object.keys(result) : 'null');
+        throw new Error('AI ответил в неожиданном формате');
+    }
+
+    return (String(rawResponse || '').trim()) || 'Не удалось получить ответ.';
+}
