@@ -69,7 +69,7 @@ class ContentService {
                     const transcriptText = await Promise.race([
                         this.getYouTubeTranscript(url),
                         new Promise<string>((_, reject) => 
-                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 90000)
+                            setTimeout(() => reject(new Error('Transcript extraction timeout')), 120000) // Увеличено до 120 секунд
                         )
                     ]);
                     
@@ -1203,12 +1203,12 @@ class ContentService {
             console.log(`Navigating to YouTube video: ${url}`);
             await page.goto(url, { 
                 waitUntil: 'domcontentloaded', // Изменено с networkidle2 на domcontentloaded для быстрой загрузки
-                timeout: 90000 // Увеличено до 90 секунд
+                timeout: 120000 // Увеличено до 120 секунд для медленных соединений
             });
 
             // Ждем полной загрузки страницы (увеличено время ожидания для надежности)
             console.log('   Waiting for page to fully load...');
-            await new Promise(resolve => setTimeout(resolve, 8000)); // Увеличено с 5 до 8 секунд
+            await new Promise(resolve => setTimeout(resolve, 10000)); // Увеличено до 10 секунд для полной загрузки
 
             // Прокручиваем немного вниз чтобы загрузить все элементы
             await page.evaluate(() => {
@@ -2305,8 +2305,13 @@ class ContentService {
             const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
             const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
             
+            // Дополнительные селекторы для описания (YouTube может использовать разные форматы)
+            const metaDescMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
+            const itemDescMatch = html.match(/<meta\s+itemprop=["']description["']\s+content=["']([^"']+)["']/i);
+            
             // Для YouTube также пробуем извлечь дополнительные данные из JSON-LD
             let jsonLdData: any = null;
+            let jsonLdDescription = '';
             try {
                 const jsonLdMatches = html.match(/<script\s+type=["']application\/ld\+json["']>([\s\S]*?)<\/script>/gi);
                 if (jsonLdMatches) {
@@ -2316,7 +2321,19 @@ class ContentService {
                             const parsed = JSON.parse(jsonContent);
                             if (parsed.name || parsed.headline || parsed.description) {
                                 jsonLdData = parsed;
+                                // Извлекаем описание из разных полей JSON-LD
+                                jsonLdDescription = parsed.description || parsed.about?.description || parsed.abstract || '';
                                 break;
+                            }
+                            // Также проверяем массивы в JSON-LD
+                            if (Array.isArray(parsed)) {
+                                for (const item of parsed) {
+                                    if (item.description || item.name) {
+                                        jsonLdData = item;
+                                        jsonLdDescription = item.description || '';
+                                        break;
+                                    }
+                                }
                             }
                         } catch (e) {
                             // Игнорируем ошибки парсинга JSON
@@ -2327,8 +2344,26 @@ class ContentService {
                 // Игнорируем ошибки извлечения JSON-LD
             }
             
+            // Для YouTube также пробуем извлечь описание из ytInitialPlayerResponse
+            let ytDescription = '';
+            try {
+                const ytPlayerMatch = html.match(/var\s+ytInitialPlayerResponse\s*=\s*({[\s\S]*?});/);
+                if (ytPlayerMatch) {
+                    const ytData = JSON.parse(ytPlayerMatch[1]);
+                    ytDescription = ytData?.videoDetails?.shortDescription || ytData?.videoDetails?.description || '';
+                }
+            } catch (e) {
+                // Игнорируем ошибки парсинга YouTube данных
+            }
+            
             const title = ogTitleMatch?.[1] || jsonLdData?.name || jsonLdData?.headline || titleMatch?.[1] || '';
-            const description = ogDescMatch?.[1] || jsonLdData?.description || '';
+            // Пробуем все возможные источники описания
+            const description = ogDescMatch?.[1] || 
+                               metaDescMatch?.[1] || 
+                               itemDescMatch?.[1] || 
+                               jsonLdDescription || 
+                               ytDescription || 
+                               '';
             
             // Для YouTube также пробуем извлечь информацию о канале
             let channelInfo = '';
@@ -2374,28 +2409,55 @@ class ContentService {
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
 
-            // Используем короткий таймаут для быстрого извлечения только метаданных
+            // Используем увеличенный таймаут для надежного извлечения метаданных
             await page.goto(url, { 
                 waitUntil: 'domcontentloaded',
-                timeout: 20000 // Уменьшаем таймаут до 20 секунд
+                timeout: 30000 // Увеличено до 30 секунд для надежности
             });
+            
+            // Ждем загрузки метаданных
+            await new Promise(resolve => setTimeout(resolve, 3000));
 
-            // Извлекаем только og:tags и title (самые надежные метаданные)
+            // Извлекаем метаданные с множественными fallback селекторами
             const metadata = await page.evaluate(() => {
                 const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
                 const ogDescription = document.querySelector('meta[property="og:description"]')?.getAttribute('content') || '';
+                const metaDesc = document.querySelector('meta[name="description"]')?.getAttribute('content') || '';
+                const itemDesc = document.querySelector('meta[itemprop="description"]')?.getAttribute('content') || '';
                 const title = document.querySelector('title')?.textContent || '';
+                
+                // Для YouTube также пробуем извлечь описание из ytInitialPlayerResponse
+                let ytDescription = '';
+                try {
+                    const scripts = Array.from(document.querySelectorAll('script'));
+                    for (const script of scripts) {
+                        const text = script.textContent || '';
+                        if (text.includes('ytInitialPlayerResponse')) {
+                            const match = text.match(/var\s+ytInitialPlayerResponse\s*=\s*({[\s\S]*?});/);
+                            if (match) {
+                                const ytData = JSON.parse(match[1]);
+                                ytDescription = ytData?.videoDetails?.shortDescription || ytData?.videoDetails?.description || '';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Игнорируем ошибки
+                }
                 
                 // Для YouTube также пробуем извлечь информацию о канале
                 let channelName = '';
                 const channelLink = document.querySelector('link[itemprop="name"]')?.getAttribute('content');
+                const channelMeta = document.querySelector('meta[itemprop="channelId"]')?.getAttribute('content');
                 if (channelLink) {
                     channelName = channelLink;
+                } else if (channelMeta) {
+                    channelName = 'YouTube';
                 }
                 
                 return {
                     title: ogTitle || title,
-                    description: ogDescription,
+                    description: ogDescription || metaDesc || itemDesc || ytDescription,
                     channelName
                 };
             });
