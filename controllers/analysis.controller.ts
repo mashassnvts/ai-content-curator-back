@@ -17,6 +17,7 @@ import { checkUserChannelsNow } from '../services/telegram-channel-monitor.servi
 import { getChannelPosts } from '../services/telegram-channel.service';
 import UserInterest from '../models/UserInterest';
 import AnalysisStageStats from '../models/AnalysisStageStats';
+import QAHistory from '../models/QAHistory';
 import sequelize from '../config/database';
 
 const MAX_URLS_LIMIT = 25;
@@ -1598,11 +1599,12 @@ export const getStageStats = async (req: Request, res: Response): Promise<Respon
 /**
  * POST /api/analysis/ask-question
  * Отвечает на вопрос пользователя на основе контента (транскрипт видео, текст статьи)
- * Body: { question: string, content: string }
+ * Body: { question: string, content: string, url?: string, analysisHistoryId?: number }
  */
 export const postAskQuestion = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { question, content } = req.body;
+        const { question, content, url, analysisHistoryId } = req.body;
+        const userId = (req as AuthenticatedRequest).user?.userId || null;
 
         if (!question || typeof question !== 'string') {
             return res.status(400).json({ message: 'Вопрос обязателен' });
@@ -1618,6 +1620,23 @@ export const postAskQuestion = async (req: Request, res: Response): Promise<Resp
         }
 
         const answer = await answerQuestionAboutContent(content, trimmedQuestion);
+
+        // Сохраняем вопрос и ответ в историю (если есть url или analysisHistoryId)
+        if (url || analysisHistoryId) {
+            try {
+                await QAHistory.create({
+                    analysisHistoryId: analysisHistoryId || null,
+                    url: url || (analysisHistoryId ? `history:${analysisHistoryId}` : 'unknown'),
+                    question: trimmedQuestion,
+                    answer: answer,
+                    userId: userId,
+                });
+                console.log(`💾 [Q&A] Saved question/answer to history (userId: ${userId || 'guest'}, url: ${url || 'N/A'})`);
+            } catch (saveError: any) {
+                // Не прерываем основной процесс, если сохранение не удалось
+                console.warn(`⚠️ [Q&A] Failed to save question/answer: ${saveError.message}`);
+            }
+        }
 
         return res.status(200).json({
             success: true,
