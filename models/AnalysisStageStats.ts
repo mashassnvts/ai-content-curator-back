@@ -5,7 +5,7 @@ interface AnalysisStageStatsAttributes {
     id: number;
     stageId: number; // ID этапа (0-7 для видео, 0-4 для текста)
     stageName: string; // Название этапа
-    itemType: 'channel' | 'urls' | 'text'; // Тип контента
+    itemType: 'channel' | 'urls' | 'text' | 'article' | 'video'; // Тип контента
     durationMs: number; // Длительность этапа в миллисекундах
     createdAt: Date;
 }
@@ -39,7 +39,7 @@ AnalysisStageStats.init(
             field: 'stage_name', // Маппинг на snake_case колонку в БД
         },
         itemType: {
-            type: DataTypes.ENUM('channel', 'urls', 'text'),
+            type: DataTypes.ENUM('channel', 'urls', 'text', 'article', 'video'),
             allowNull: false,
             field: 'item_type', // Маппинг на snake_case колонку в БД
         },

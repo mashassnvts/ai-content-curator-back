@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import crypto from 'crypto';
 import contentService from '../services/content.service';
-import { analyzeContent as analyzeContentWithAI, UserFeedbackHistory } from '../services/ai.service'; 
+import { analyzeContent as analyzeContentWithAI, UserFeedbackHistory, answerQuestionAboutContent } from '../services/ai.service'; 
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import AnalysisHistory from '../models/AnalysisHistory';
 import historyCleanupService from '../services/history-cleanup.service';
@@ -42,7 +42,7 @@ const stageStartTimes = new Map<string, Map<number, number>>();
 /**
  * Записывает статистику времени этапа
  */
-const recordStageStats = async (stageId: number, stageName: string, itemType: 'channel' | 'urls' | 'text', durationMs: number) => {
+const recordStageStats = async (stageId: number, stageName: string, itemType: 'channel' | 'urls' | 'text' | 'article' | 'video', durationMs: number) => {
     try {
         if (!itemType) {
             console.warn(`⚠️ Cannot record stage stats: itemType is undefined (stageId: ${stageId})`);
@@ -83,7 +83,7 @@ const startStageTracking = (jobId: string, stageId: number) => {
 /**
  * Завершает отслеживание этапа и записывает статистику
  */
-const endStageTracking = async (jobId: string, stageId: number, itemType: 'channel' | 'urls' | 'text' | undefined) => {
+const endStageTracking = async (jobId: string, stageId: number, itemType: 'channel' | 'urls' | 'text' | 'article' | 'video' | undefined) => {
     try {
         // Если itemType не передан, пытаемся получить его из job
         let finalItemType = itemType;
@@ -121,9 +121,9 @@ const endStageTracking = async (jobId: string, stageId: number, itemType: 'chann
     }
 };
 
-// Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType? })
+// Хранилище асинхронных задач анализа (jobId -> { status, results?, error?, totalExpected?, itemType?, useMetadata? })
 // Используется для обхода таймаута Railway на длительных запросах
-const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls' | 'text'; channelProgress?: number; currentItemIndex?: number; currentStage?: number }>();
+const analysisJobs = new Map<string, { status: 'pending' | 'in_progress' | 'completed' | 'error'; results?: any[]; error?: string; totalExpected?: number; itemType?: 'channel' | 'urls' | 'text' | 'article' | 'video'; channelProgress?: number; currentItemIndex?: number; currentStage?: number; useMetadata?: boolean }>();
 
 /**
  * Проверяет, является ли строка валидным URL
@@ -475,6 +475,7 @@ const processTextAnalysis = async (
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
             extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
             analysisHistoryId,
+            extractedContent: text, // Полный текст для Q&A после анализа
             error: false
         };
     } catch (error: any) {
@@ -536,23 +537,45 @@ export const processSingleUrlAnalysis = async (
         
         const { content, sourceType } = await contentService.extractContentFromUrl(url);
         
+        // Определяем тип контента для статистики: video (если есть транскрипт) или article (статья/метаданные)
+        const statsItemType: 'article' | 'video' = sourceType === 'transcript' ? 'video' : 'article';
+        const useMetadata = sourceType === 'metadata';
+        
+        // Обновляем job с информацией о метаданных для фронтенда
+        if (jobId && itemIndex != null) {
+            const job = analysisJobs.get(jobId);
+            if (job) {
+                analysisJobs.set(jobId, { ...job, useMetadata });
+            }
+        }
+        
         // Завершаем этап 0
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
             const itemType = job?.itemType || 'urls';
-            await endStageTracking(jobId, 0, itemType);
+            // Используем statsItemType для статистики (article/video вместо urls)
+            await endStageTracking(jobId, 0, statsItemType);
         }
         
-        // Этап 1: Извлечение транскрипта (для видео)
-        if (jobId && itemIndex != null && sourceType === 'transcript') {
+        // Этап 1: Извлечение транскрипта (для видео) или метаданных (для статей)
+        if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
             if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
-                startStageTracking(jobId, 1);
+                if (sourceType === 'transcript') {
+                    // Видео с транскриптом
+                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1, useMetadata: false });
+                    startStageTracking(jobId, 1);
+                    // Транскрипт уже извлечен в extractContentFromUrl, завершаем этап сразу
+                    await endStageTracking(jobId, 1, statsItemType);
+                } else if (sourceType === 'metadata') {
+                    // Используются метаданные вместо транскрипта
+                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1, useMetadata: true });
+                    startStageTracking(jobId, 1);
+                    // Метаданные уже извлечены, завершаем этап сразу
+                    await endStageTracking(jobId, 1, statsItemType);
+                }
+                // Для статей (sourceType === 'article') этап 1 пропускается
             }
-            // Транскрипт уже извлечен в extractContentFromUrl, завершаем этап сразу
-            await endStageTracking(jobId, 1, itemType);
         }
         
         // Логируем тип источника для диагностики
@@ -623,7 +646,6 @@ export const processSingleUrlAnalysis = async (
         // Этап 2: AI-анализ
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
             if (job) {
                 analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
                 startStageTracking(jobId, 2);
@@ -634,9 +656,7 @@ export const processSingleUrlAnalysis = async (
         
         // Завершаем этап 2
         if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
-            await endStageTracking(jobId, 2, itemType);
+            await endStageTracking(jobId, 2, statsItemType);
         }
         
         // Этап 3: Генерация эмбеддинга (начинаем отслеживание, если будет использоваться)
@@ -660,7 +680,6 @@ export const processSingleUrlAnalysis = async (
                 // Этап 6: Извлечение тем (раньше, чтобы показать прогресс)
                 if (jobId && itemIndex != null) {
                     const job = analysisJobs.get(jobId);
-                    const itemType = job?.itemType || 'urls';
                     if (job) {
                         analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 6 });
                         startStageTracking(jobId, 6);
@@ -671,9 +690,7 @@ export const processSingleUrlAnalysis = async (
                 
                 // Завершаем этап 6
                 if (jobId && itemIndex != null) {
-                    const job = analysisJobs.get(jobId);
-                    const itemType = job?.itemType || 'urls';
-                    await endStageTracking(jobId, 6, itemType);
+                    await endStageTracking(jobId, 6, statsItemType);
                 }
                 
                 if (themes.length > 0) {
@@ -693,7 +710,6 @@ export const processSingleUrlAnalysis = async (
                         // Этап 4: Семантическое сравнение (для видео/URL)
                         if (jobId && itemIndex != null) {
                             const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'urls';
                             if (job) {
                                 analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
                                 startStageTracking(jobId, 4);
@@ -706,9 +722,7 @@ export const processSingleUrlAnalysis = async (
                         
                         // Завершаем этап 4
                         if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'urls';
-                            await endStageTracking(jobId, 4, itemType);
+                            await endStageTracking(jobId, 4, statsItemType);
                         }
                         
                         console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
@@ -802,7 +816,6 @@ export const processSingleUrlAnalysis = async (
                             // Этап 5: Оценка сложности
                             if (jobId && itemIndex != null) {
                                 const job = analysisJobs.get(jobId);
-                                const itemType = job?.itemType || 'urls';
                                 if (job) {
                                     analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 5 });
                                     startStageTracking(jobId, 5);
@@ -819,9 +832,7 @@ export const processSingleUrlAnalysis = async (
                             
                             // Завершаем этап 5
                             if (jobId && itemIndex != null) {
-                                const job = analysisJobs.get(jobId);
-                                const itemType = job?.itemType || 'urls';
-                                await endStageTracking(jobId, 5, itemType);
+                                await endStageTracking(jobId, 5, statsItemType);
                             }
                             
                             // Сохраняем оценку релевантности для каждого интереса
@@ -922,7 +933,6 @@ export const processSingleUrlAnalysis = async (
                         // Этап 3: Генерация эмбеддинга
                         if (jobId && itemIndex != null) {
                             const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'urls';
                             if (job) {
                                 analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 3 });
                             }
@@ -932,9 +942,7 @@ export const processSingleUrlAnalysis = async (
                         
                         // Завершаем этап 3
                         if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'urls';
-                            await endStageTracking(jobId, 3, itemType);
+                            await endStageTracking(jobId, 3, statsItemType);
                         }
                         
                         console.log(`✅ Generated and saved embedding for analysis_history ID: ${analysisHistoryId} (using summary + URL: ${textForEmbedding.length} chars)`);
@@ -967,13 +975,12 @@ export const processSingleUrlAnalysis = async (
         // Этап 7: Формирование выводов (завершаем до return, чтобы job не помечался completed раньше времени)
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
             if (job) {
                 analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
                 startStageTracking(jobId, 7);
             }
             // Завершаем этап 7 синхронно, чтобы статус "completed" выставлялся только после записи статистики
-            await endStageTracking(jobId, 7, itemType);
+            await endStageTracking(jobId, 7, statsItemType);
         }
         
         return {
@@ -984,6 +991,7 @@ export const processSingleUrlAnalysis = async (
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
             extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
             analysisHistoryId, // Добавляем ID записи в истории
+            extractedContent: content, // Полный контент для Q&A после анализа
             error: false
         };
     } catch (error: any) {
@@ -1583,6 +1591,43 @@ export const getStageStats = async (req: Request, res: Response): Promise<Respon
         return res.status(500).json({ 
             message: 'Failed to fetch stage stats', 
             error: error.message || 'Unknown error'
+        });
+    }
+};
+
+/**
+ * POST /api/analysis/ask-question
+ * Отвечает на вопрос пользователя на основе контента (транскрипт видео, текст статьи)
+ * Body: { question: string, content: string }
+ */
+export const postAskQuestion = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { question, content } = req.body;
+
+        if (!question || typeof question !== 'string') {
+            return res.status(400).json({ message: 'Вопрос обязателен' });
+        }
+
+        if (!content || typeof content !== 'string') {
+            return res.status(400).json({ message: 'Контент обязателен для ответа на вопрос' });
+        }
+
+        const trimmedQuestion = question.trim();
+        if (trimmedQuestion.length < 3) {
+            return res.status(400).json({ message: 'Вопрос слишком короткий' });
+        }
+
+        const answer = await answerQuestionAboutContent(content, trimmedQuestion);
+
+        return res.status(200).json({
+            success: true,
+            answer
+        });
+    } catch (error: any) {
+        console.error('[Ask Question] Error:', error);
+        return res.status(500).json({
+            message: error.message || 'Не удалось получить ответ на вопрос',
+            error: error.message
         });
     }
 };
