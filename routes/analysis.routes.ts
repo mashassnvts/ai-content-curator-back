@@ -12,7 +12,7 @@ router.get('/status/:jobId', getAnalysisStatus); // Polling для асинхр�
 router.post('/find-similar', authMiddleware, findSimilarArticlesEndpoint); // Поиск похожих статей по эмбеддингу
 router.post('/test-extract-themes', testExtractThemes); // Тестовый эндпоинт для проверки извлечения тем
 router.get('/stage-stats', getStageStats); // Статистика времени этапов (общая для всех пользователей)
-router.post('/ask-question', postAskQuestion); // Вопросы по контенту после анализа
+router.post('/ask-question', postAskQuestion); // Вопросы по контенту после анализа (auth опционально - работает и для гостей)
 router.get('/history', authMiddleware, getHistory);
 router.get('/history/:id', authMiddleware, getHistoryItem);
 router.get('/history/:id/reanalyze', authMiddleware, reanalyzeFromHistory);

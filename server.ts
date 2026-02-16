@@ -309,6 +309,36 @@ const startServer = async () => {
             console.warn('⚠️ Could not check/add original_text column:', columnError.message);
         }
         
+        // Проверяем и создаем таблицу qa_history если её нет
+        const hasQAHistoryTable = tables.includes('qa_history');
+        if (!hasQAHistoryTable) {
+            console.log('📊 Creating qa_history table...');
+            try {
+                await sequelize.query(`
+                    CREATE TABLE IF NOT EXISTS qa_history (
+                        id SERIAL PRIMARY KEY,
+                        analysis_history_id INT REFERENCES analysis_history(id) ON DELETE CASCADE,
+                        url TEXT NOT NULL,
+                        question TEXT NOT NULL,
+                        answer TEXT NOT NULL,
+                        user_id INT REFERENCES users(id) ON DELETE SET NULL,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    
+                    CREATE INDEX IF NOT EXISTS idx_qa_history_analysis ON qa_history(analysis_history_id);
+                    CREATE INDEX IF NOT EXISTS idx_qa_history_url ON qa_history(url);
+                    CREATE INDEX IF NOT EXISTS idx_qa_history_user ON qa_history(user_id);
+                    CREATE INDEX IF NOT EXISTS idx_qa_history_created ON qa_history(created_at);
+                `);
+                console.log('✅ Table qa_history created successfully');
+            } catch (createError: any) {
+                console.error('❌ Failed to create qa_history table:', createError.message);
+                console.warn('💡 Please run the migration script manually: add-qa-history.sql');
+            }
+        } else {
+            console.log('✅ Table qa_history exists');
+        }
+        
         dbConnected = true;
     } catch (error: any) {
         console.error('❌ Database connection/sync error:', error.message);
