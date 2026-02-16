@@ -964,7 +964,7 @@ export const processSingleUrlAnalysis = async (
             }
         }
 
-        // Этап 7: Формирование выводов
+        // Этап 7: Формирование выводов (завершаем до return, чтобы job не помечался completed раньше времени)
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
             const itemType = job?.itemType || 'urls';
@@ -972,16 +972,8 @@ export const processSingleUrlAnalysis = async (
                 analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
                 startStageTracking(jobId, 7);
             }
-        }
-        
-        // Завершаем этап 7 (сразу после начала, так как это финальный этап)
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
-            // Небольшая задержка для корректного измерения времени финального этапа
-            setTimeout(async () => {
-                await endStageTracking(jobId, 7, itemType);
-            }, 100);
+            // Завершаем этап 7 синхронно, чтобы статус "completed" выставлялся только после записи статистики
+            await endStageTracking(jobId, 7, itemType);
         }
         
         return {
@@ -1552,18 +1544,19 @@ export const testExtractThemes = async (req: Request, res: Response): Promise<Re
  */
 export const getStageStats = async (req: Request, res: Response): Promise<Response> => {
     try {
+        // Используем snake_case имена колонок (как в БД), результат маппим в camelCase
         const stats = await AnalysisStageStats.findAll({
             attributes: [
-                'stageId',
-                'stageName',
-                'itemType',
-                [sequelize.fn('AVG', sequelize.col('durationMs')), 'avgDurationMs'],
-                [sequelize.fn('MIN', sequelize.col('durationMs')), 'minDurationMs'],
-                [sequelize.fn('MAX', sequelize.col('durationMs')), 'maxDurationMs'],
+                [sequelize.col('stage_id'), 'stageId'],
+                [sequelize.col('stage_name'), 'stageName'],
+                [sequelize.col('item_type'), 'itemType'],
+                [sequelize.fn('AVG', sequelize.col('duration_ms')), 'avgDurationMs'],
+                [sequelize.fn('MIN', sequelize.col('duration_ms')), 'minDurationMs'],
+                [sequelize.fn('MAX', sequelize.col('duration_ms')), 'maxDurationMs'],
                 [sequelize.fn('COUNT', sequelize.col('id')), 'count']
             ],
-            group: ['stageId', 'stageName', 'itemType'],
-            order: [['itemType', 'ASC'], ['stageId', 'ASC']],
+            group: ['stage_id', 'stage_name', 'item_type'],
+            order: [[sequelize.col('item_type'), 'ASC'], [sequelize.col('stage_id'), 'ASC']],
         });
 
         // Форматируем результаты
