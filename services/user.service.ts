@@ -299,28 +299,30 @@ class UserService {
 
     /**
      * Запрашивает восстановление пароля для пользователя
-     * Генерирует токен восстановления и отправляет email
+     * Генерирует код восстановления и возвращает его (без отправки email)
      */
-    async requestPasswordReset(email: string): Promise<boolean> {
+    async requestPasswordReset(email: string): Promise<{ success: boolean; resetCode?: string; expiresAt?: Date }> {
         // Нормализуем email
         const normalizedEmail = email.trim().toLowerCase();
         
         // Находим пользователя
         const user = await User.findOne({ where: { email: normalizedEmail } });
         
-        // Для безопасности всегда возвращаем true, даже если пользователь не найден
-        // Это предотвращает перебор email'ов
+        // Если пользователь не найден - возвращаем false для безопасности
         if (!user) {
             console.log(`⚠️ Password reset requested for non-existent email: ${normalizedEmail}`);
-            return true;
+            return { success: false };
         }
 
-        // Генерируем криптографически безопасный токен
+        // Генерируем полный токен для хранения в БД (32 байта = 64 hex символа)
         const resetToken = crypto.randomBytes(32).toString('hex');
         
-        // Устанавливаем время истечения токена (1 час)
+        // Генерируем короткий код восстановления из первых 8 символов токена
+        const resetCode = resetToken.substring(0, 8).toUpperCase(); // 8 символов в верхнем регистре
+        
+        // Устанавливаем время истечения кода (30 минут)
         const resetExpires = new Date();
-        resetExpires.setHours(resetExpires.getHours() + 1);
+        resetExpires.setMinutes(resetExpires.getMinutes() + 30);
 
         // Сохраняем токен и время истечения в БД
         await user.update({
@@ -328,52 +330,36 @@ class UserService {
             password_reset_expires_at: resetExpires,
         });
 
-        console.log(`✅ Password reset token generated for user: ${normalizedEmail}`);
-        console.log(`   Token: ${resetToken.substring(0, 10)}...`);
+        console.log(`✅ Password reset code generated for user: ${normalizedEmail}`);
+        console.log(`   Code: ${resetCode}`);
         console.log(`   Expires at: ${resetExpires.toISOString()}`);
 
-        // Отправляем email с токеном восстановления
-        console.log(`📧 Sending password reset email to ${normalizedEmail}...`);
-        try {
-            const emailSent = await emailService.sendPasswordResetEmail(
-                normalizedEmail,
-                resetToken,
-                '' // URL будет сформирован в email.service
-            );
-
-            if (!emailSent) {
-                console.error(`❌ Failed to send password reset email to ${normalizedEmail}`);
-                console.error(`   Token was generated but email was not sent. User can request again.`);
-                // Не удаляем токен, если email не отправлен - пользователь может попробовать еще раз
-            } else {
-                console.log(`✅ Password reset email sent successfully to ${normalizedEmail}`);
-            }
-        } catch (emailError: any) {
-            console.error(`❌ Exception while sending password reset email to ${normalizedEmail}:`, emailError.message);
-            console.error(`   Token was generated but email sending failed. User can request again.`);
-            if (emailError.stack) {
-                console.error(`   Stack: ${emailError.stack.substring(0, 300)}`);
-            }
-        }
-
-        return true; // Всегда возвращаем true для безопасности
+        // Возвращаем код для отображения на странице
+        return { 
+            success: true, 
+            resetCode: resetCode,
+            expiresAt: resetExpires
+        };
     }
 
     /**
-     * Сбрасывает пароль пользователя по токену восстановления
+     * Сбрасывает пароль пользователя по коду восстановления
      */
-    async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-        // Находим пользователя по токену восстановления
+    async resetPassword(email: string, resetCode: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+        // Нормализуем email
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        // Находим пользователя по email
         const user = await User.findOne({
             where: {
-                password_reset_token: token,
+                email: normalizedEmail,
             },
         });
 
-        if (!user) {
+        if (!user || !user.password_reset_token) {
             return {
                 success: false,
-                message: 'Неверный или истекший токен восстановления пароля.',
+                message: 'Неверный email или код восстановления не был запрошен.',
             };
         }
 
@@ -386,7 +372,19 @@ class UserService {
             });
             return {
                 success: false,
-                message: 'Токен восстановления пароля истек. Запросите новый.',
+                message: 'Код восстановления пароля истек. Запросите новый.',
+            };
+        }
+
+        // Генерируем код из сохраненного токена для проверки
+        // Используем первые 8 символов токена в верхнем регистре
+        const expectedCode = user.password_reset_token.substring(0, 8).toUpperCase();
+        
+        // Проверяем код (без учета регистра для удобства пользователя)
+        if (resetCode.toUpperCase() !== expectedCode) {
+            return {
+                success: false,
+                message: 'Неверный код восстановления. Проверьте правильность ввода.',
             };
         }
 

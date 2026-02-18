@@ -393,13 +393,23 @@ class UserController {
                 return res.status(400).json({ message: 'Неверный формат email' });
             }
 
-            // Запрашиваем восстановление пароля (всегда возвращает true для безопасности)
-            await UserService.requestPasswordReset(email);
+            // Запрашиваем восстановление пароля (возвращает код для отображения)
+            const result = await UserService.requestPasswordReset(email);
 
-            // Всегда возвращаем успешный ответ, даже если пользователь не найден
-            // Это предотвращает перебор email'ов
+            // Если пользователь не найден - возвращаем общее сообщение для безопасности
+            if (!result.success) {
+                return res.status(200).json({
+                    message: 'Если указанный email существует в системе, код восстановления будет показан на странице.',
+                    success: false,
+                });
+            }
+
+            // Возвращаем код для отображения на странице
             return res.status(200).json({
-                message: 'Если указанный email существует в системе, на него было отправлено письмо с инструкциями по восстановлению пароля.',
+                success: true,
+                resetCode: result.resetCode,
+                expiresAt: result.expiresAt,
+                message: 'Код восстановления пароля сгенерирован.',
             });
         } catch (error: any) {
             console.error('Error requesting password reset:', error);
@@ -411,16 +421,20 @@ class UserController {
     }
 
     /**
-     * Сбрасывает пароль по токену восстановления
+     * Сбрасывает пароль по коду восстановления
      * POST /api/auth/reset-password
-     * Body: { token: string, password: string }
+     * Body: { email: string, resetCode: string, password: string }
      */
     async resetPassword(req: Request, res: Response): Promise<Response | void> {
         try {
-            const { token, password } = req.body;
+            const { email, resetCode, password } = req.body;
 
-            if (!token || typeof token !== 'string') {
-                return res.status(400).json({ message: 'Токен восстановления обязателен' });
+            if (!email || typeof email !== 'string') {
+                return res.status(400).json({ message: 'Email обязателен' });
+            }
+
+            if (!resetCode || typeof resetCode !== 'string') {
+                return res.status(400).json({ message: 'Код восстановления обязателен' });
             }
 
             if (!password || typeof password !== 'string') {
@@ -428,7 +442,7 @@ class UserController {
             }
 
             // Сбрасываем пароль
-            const result = await UserService.resetPassword(token, password);
+            const result = await UserService.resetPassword(email, resetCode, password);
 
             if (!result.success) {
                 return res.status(400).json({ message: result.message });

@@ -83,6 +83,28 @@ class EmailService {
                 greetingTimeout: 30000, // 30 секунд на приветствие
                 socketTimeout: 60000, // 60 секунд на операции
             });
+        } else if (cleanHost.includes('yandex')) {
+            // Для Яндекс используем специальную конфигурацию
+            console.log('   Using Yandex service configuration');
+            // Яндекс требует полный email в качестве username
+            const yandexUser = cleanUser.includes('@') ? cleanUser : `${cleanUser}@yandex.ru`;
+            
+            this.transporter = nodemailer.createTransport({
+                host: 'smtp.yandex.ru',
+                port: 465, // Яндекс рекомендует порт 465 для SSL
+                secure: true, // SSL для порта 465
+                auth: {
+                    user: yandexUser,
+                    pass: cleanPassword,
+                },
+                tls: {
+                    rejectUnauthorized: false,
+                },
+                // Увеличиваем таймауты для подключения
+                connectionTimeout: 60000,
+                greetingTimeout: 30000,
+                socketTimeout: 60000,
+            });
         } else {
             // Для других SMTP серверов используем стандартную конфигурацию
             this.transporter = nodemailer.createTransport({
@@ -120,6 +142,18 @@ class EmailService {
                         console.error('   2. Enable 2-Step Verification: https://myaccount.google.com/security');
                         console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
                         console.error('   4. Check if "Less secure app access" is enabled (if using regular password)');
+                        if (error.code === 'EAUTH') {
+                            console.error('   5. Authentication failed - double-check your App Password');
+                        }
+                    }
+                    
+                    // Специфичные подсказки для Яндекс
+                    if (cleanHost.includes('yandex')) {
+                        console.error('💡 Yandex troubleshooting:');
+                        console.error('   1. Make sure you are using an App Password (not your regular password)');
+                        console.error('   2. Create App Password: https://id.yandex.ru/security/app-passwords');
+                        console.error('   3. Enable "Пароли приложений" in Yandex ID settings');
+                        console.error('   4. Use full email address (user@yandex.ru) as EMAIL_USER');
                         if (error.code === 'EAUTH') {
                             console.error('   5. Authentication failed - double-check your App Password');
                         }
