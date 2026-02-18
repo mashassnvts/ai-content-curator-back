@@ -1243,7 +1243,7 @@ const runAnalysisInBackground = async (
                             contextForAnalysis,
                             feedbackHistory,
                             userId,
-                            'unread',
+                            analysisMode, // Используем режим пользователя (read/unread), а не всегда 'unread'
                             jobId,
                             j,
                             true // skipHistorySave = true для постов каналов (сохраним канал как одну запись)

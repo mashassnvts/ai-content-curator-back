@@ -6,6 +6,8 @@ const router = Router();
 
 router.post('/register', UserController.register);
 router.post('/login', UserController.login);
+router.post('/forgot-password', UserController.requestPasswordReset);
+router.post('/reset-password', UserController.resetPassword);
 
 router.get('/profile', authMiddleware, UserController.getProfile);
 router.get('/interests', authMiddleware, UserController.getInterests);

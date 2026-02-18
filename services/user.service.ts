@@ -6,7 +6,9 @@ import UserSemanticTag from '../models/UserSemanticTag';
 import BotProfile from '../models/BotProfile';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import dotenv from 'dotenv';
+import emailService from './email.service';
 
 dotenv.config();
 
@@ -293,6 +295,111 @@ class UserService {
 
         await tag.destroy();
         return true;
+    }
+
+    /**
+     * Запрашивает восстановление пароля для пользователя
+     * Генерирует токен восстановления и отправляет email
+     */
+    async requestPasswordReset(email: string): Promise<boolean> {
+        // Нормализуем email
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        // Находим пользователя
+        const user = await User.findOne({ where: { email: normalizedEmail } });
+        
+        // Для безопасности всегда возвращаем true, даже если пользователь не найден
+        // Это предотвращает перебор email'ов
+        if (!user) {
+            console.log(`⚠️ Password reset requested for non-existent email: ${normalizedEmail}`);
+            return true;
+        }
+
+        // Генерируем криптографически безопасный токен
+        const resetToken = crypto.randomBytes(32).toString('hex');
+        
+        // Устанавливаем время истечения токена (1 час)
+        const resetExpires = new Date();
+        resetExpires.setHours(resetExpires.getHours() + 1);
+
+        // Сохраняем токен и время истечения в БД
+        await user.update({
+            password_reset_token: resetToken,
+            password_reset_expires_at: resetExpires,
+        });
+
+        console.log(`✅ Password reset token generated for user: ${normalizedEmail}`);
+
+        // Отправляем email с токеном восстановления
+        const emailSent = await emailService.sendPasswordResetEmail(
+            normalizedEmail,
+            resetToken,
+            '' // URL будет сформирован в email.service
+        );
+
+        if (!emailSent) {
+            console.error(`❌ Failed to send password reset email to ${normalizedEmail}`);
+            // Не удаляем токен, если email не отправлен - пользователь может попробовать еще раз
+        }
+
+        return true; // Всегда возвращаем true для безопасности
+    }
+
+    /**
+     * Сбрасывает пароль пользователя по токену восстановления
+     */
+    async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+        // Находим пользователя по токену восстановления
+        const user = await User.findOne({
+            where: {
+                password_reset_token: token,
+            },
+        });
+
+        if (!user) {
+            return {
+                success: false,
+                message: 'Неверный или истекший токен восстановления пароля.',
+            };
+        }
+
+        // Проверяем, не истек ли токен
+        if (!user.password_reset_expires_at || user.password_reset_expires_at < new Date()) {
+            // Очищаем токен
+            await user.update({
+                password_reset_token: null,
+                password_reset_expires_at: null,
+            });
+            return {
+                success: false,
+                message: 'Токен восстановления пароля истек. Запросите новый.',
+            };
+        }
+
+        // Валидация нового пароля
+        if (!newPassword || newPassword.length < 6) {
+            return {
+                success: false,
+                message: 'Пароль должен содержать минимум 6 символов.',
+            };
+        }
+
+        // Хешируем новый пароль
+        const password_hash = await bcrypt.hash(newPassword, 10);
+
+        // Обновляем пароль и очищаем токен восстановления
+        await user.update({
+            password_hash: password_hash,
+            password_reset_token: null,
+            password_reset_expires_at: null,
+        });
+
+        console.log(`✅ Password reset successful for user: ${user.email}`);
+
+        return {
+            success: true,
+            message: 'Пароль успешно изменен.',
+        };
     }
 }
 

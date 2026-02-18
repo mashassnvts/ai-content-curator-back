@@ -339,6 +339,49 @@ const startServer = async () => {
             console.log('✅ Table qa_history exists');
         }
         
+        // Проверяем и добавляем поля для восстановления пароля в users если их нет
+        try {
+            const passwordResetColumns = await sequelize.query(
+                `SELECT column_name FROM information_schema.columns 
+                 WHERE table_name = 'users' AND column_name IN ('password_reset_token', 'password_reset_expires_at')`,
+                { type: QueryTypes.SELECT }
+            ) as any[];
+            
+            const hasPasswordResetToken = passwordResetColumns.some((col: any) => col.column_name === 'password_reset_token');
+            const hasPasswordResetExpires = passwordResetColumns.some((col: any) => col.column_name === 'password_reset_expires_at');
+            
+            if (!hasPasswordResetToken || !hasPasswordResetExpires) {
+                console.log('📊 Adding password reset fields to users table...');
+                if (!hasPasswordResetToken) {
+                    await sequelize.query(`
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token VARCHAR(255) NULL;
+                    `);
+                    console.log('✅ Column password_reset_token added to users');
+                }
+                if (!hasPasswordResetExpires) {
+                    await sequelize.query(`
+                        ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMP NULL;
+                    `);
+                    console.log('✅ Column password_reset_expires_at added to users');
+                }
+                
+                // Создаем индекс для быстрого поиска по токену
+                try {
+                    await sequelize.query(`
+                        CREATE INDEX IF NOT EXISTS idx_users_password_reset_token ON users(password_reset_token);
+                    `);
+                    console.log('✅ Index on password_reset_token created');
+                } catch (indexError: any) {
+                    console.log('ℹ️ Index on password_reset_token may already exist');
+                }
+            } else {
+                console.log('✅ Password reset fields exist in users table');
+            }
+        } catch (passwordResetError: any) {
+            console.warn('⚠️ Could not check/add password reset fields:', passwordResetError.message);
+            console.warn('💡 Please run the migration script manually: add-password-reset-fields.sql');
+        }
+        
         dbConnected = true;
     } catch (error: any) {
         console.error('❌ Database connection/sync error:', error.message);
