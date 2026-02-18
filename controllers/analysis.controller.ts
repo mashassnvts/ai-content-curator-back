@@ -504,7 +504,8 @@ export const processSingleUrlAnalysis = async (
     userId?: number,
     mode: 'read' | 'unread' = 'read',
     jobId?: string,
-    itemIndex?: number
+    itemIndex?: number,
+    skipHistorySave: boolean = false // Флаг для пропуска сохранения в историю (для постов каналов)
 ) => {
     // Сохраняем полный контент для использования в эмбеддинге
     let fullContentForEmbedding: string | null = null;
@@ -901,8 +902,9 @@ export const processSingleUrlAnalysis = async (
         }
         
         // Сохраняем результат анализа в историю и генерируем эмбеддинг (если пользователь авторизован)
+        // Пропускаем сохранение для постов каналов (они сохраняются как одна запись канала)
         let analysisHistoryId: number | undefined = undefined;
-        if (userId && analysisResult?.summary) {
+        if (userId && analysisResult?.summary && !skipHistorySave) {
             try {
                 const historyRecord = await AnalysisHistory.create({
                     userId,
@@ -1243,7 +1245,8 @@ const runAnalysisInBackground = async (
                             userId,
                             'unread',
                             jobId,
-                            j
+                            j,
+                            true // skipHistorySave = true для постов каналов (сохраним канал как одну запись)
                         );
                         if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
                             const res = analysisResult as any;
@@ -1326,6 +1329,53 @@ const runAnalysisInBackground = async (
                     urlResults[existingChannelIndex] = finalChannelResult;
                 } else {
                     urlResults.push(finalChannelResult);
+                }
+                
+                // Сохраняем канал как одну запись в истории (если пользователь авторизован)
+                if (userId && finalChannelResult.channelAnalysis) {
+                    try {
+                        // Формируем summary с информацией о канале
+                        const channelSummary = `📢 Анализ Telegram-канала @${channelUsername}\n\n` +
+                            `Проанализировано постов: ${finalChannelResult.channelAnalysis.totalPosts}\n` +
+                            `Релевантных постов: ${finalChannelResult.channelAnalysis.relevantPosts}\n` +
+                            `Процент релевантности: ${finalChannelResult.channelAnalysis.totalPosts > 0 ? Math.round((finalChannelResult.channelAnalysis.relevantPosts / finalChannelResult.channelAnalysis.totalPosts) * 100) : 0}%\n\n` +
+                            `Рекомендация: ${finalChannelResult.channelAnalysis.recommendation}`;
+                        
+                        // Формируем reasoning с детальной информацией о постах
+                        const channelReasoning = `Детальный анализ канала @${channelUsername}:\n\n` +
+                            finalChannelResult.channelAnalysis.posts.map((post, idx) => 
+                                `Пост ${idx + 1}:\n` +
+                                `URL: ${post.url}\n` +
+                                `Оценка: ${post.score}/100\n` +
+                                `Вердикт: ${post.verdict}\n` +
+                                (post.summary ? `Саммари: ${post.summary}\n` : '') +
+                                (post.reasoning ? `Объяснение: ${post.reasoning}\n` : '') +
+                                `\n---\n`
+                            ).join('\n');
+                        
+                        // Вычисляем средний score для канала
+                        const avgScore = finalChannelResult.channelAnalysis.posts.length > 0
+                            ? Math.round(finalChannelResult.channelAnalysis.posts.reduce((sum, p) => sum + p.score, 0) / finalChannelResult.channelAnalysis.posts.length)
+                            : 0;
+                        
+                        // Определяем общий вердикт на основе среднего score
+                        const channelVerdict = avgScore >= 70 ? 'Полезно' : avgScore >= 40 ? 'Нейтрально' : 'Не трать время';
+                        
+                        await AnalysisHistory.create({
+                            userId,
+                            telegramId: null,
+                            url: url, // URL канала
+                            sourceType: 'telegram_channel',
+                            score: avgScore,
+                            verdict: channelVerdict,
+                            summary: channelSummary,
+                            reasoning: channelReasoning,
+                            interests,
+                        });
+                        console.log(`💾 Saved channel analysis to history: @${channelUsername} (${finalChannelResult.channelAnalysis.totalPosts} posts)`);
+                    } catch (error: any) {
+                        console.warn(`⚠️ Failed to save channel analysis to history: ${error.message}`);
+                    }
                 }
             } else {
                 const job = analysisJobs.get(jobId);
