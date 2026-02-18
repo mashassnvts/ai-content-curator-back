@@ -396,6 +396,12 @@ class UserController {
             // Запрашиваем восстановление пароля (возвращает код для отображения)
             const result = await UserService.requestPasswordReset(email);
 
+            console.log('📋 Password reset request result:', {
+                success: result.success,
+                resetCode: result.resetCode,
+                expiresAt: result.expiresAt,
+            });
+
             // Если пользователь не найден - возвращаем общее сообщение для безопасности
             if (!result.success) {
                 return res.status(200).json({
@@ -405,12 +411,17 @@ class UserController {
             }
 
             // Возвращаем код для отображения на странице
-            return res.status(200).json({
+            // Преобразуем Date в ISO строку для правильной сериализации JSON
+            const responseData = {
                 success: true,
                 resetCode: result.resetCode,
-                expiresAt: result.expiresAt,
+                expiresAt: result.expiresAt ? result.expiresAt.toISOString() : null,
                 message: 'Код восстановления пароля сгенерирован.',
-            });
+            };
+            
+            console.log('📤 Sending response:', responseData);
+            
+            return res.status(200).json(responseData);
         } catch (error: any) {
             console.error('Error requesting password reset:', error);
             return res.status(500).json({
