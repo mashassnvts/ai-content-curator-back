@@ -13,6 +13,8 @@ interface UserAttributes {
     telegram_chat_id?: string | null;
     telegram_link_code?: string | null;
     telegram_link_code_expires_at?: Date | null;
+    password_reset_token?: string | null;
+    password_reset_expires_at?: Date | null;
 }
 
 interface UserCreationAttributes extends Optional<UserAttributes, 'id'> {}
@@ -28,6 +30,8 @@ class User extends Model<UserAttributes, UserCreationAttributes> implements User
     public telegram_chat_id?: string | null;
     public telegram_link_code?: string | null;
     public telegram_link_code_expires_at?: Date | null;
+    public password_reset_token?: string | null;
+    public password_reset_expires_at?: Date | null;
 
     public readonly createdAt!: Date;
     public readonly updatedAt!: Date;
@@ -78,6 +82,14 @@ User.init(
             allowNull: true,
         },
         telegram_link_code_expires_at: {
+            type: DataTypes.DATE,
+            allowNull: true,
+        },
+        password_reset_token: {
+            type: DataTypes.STRING,
+            allowNull: true,
+        },
+        password_reset_expires_at: {
             type: DataTypes.DATE,
             allowNull: true,
         },

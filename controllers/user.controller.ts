@@ -384,5 +384,77 @@ class UserController {
             });
         }
     }
+
+    /**
+     * Запрашивает восстановление пароля
+     * POST /api/auth/forgot-password
+     * Body: { email: string }
+     */
+    async requestPasswordReset(req: Request, res: Response): Promise<Response | void> {
+        try {
+            const { email } = req.body;
+
+            if (!email || typeof email !== 'string') {
+                return res.status(400).json({ message: 'Email обязателен для заполнения' });
+            }
+
+            // Проверка формата email
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!emailRegex.test(email)) {
+                return res.status(400).json({ message: 'Неверный формат email' });
+            }
+
+            // Запрашиваем восстановление пароля (всегда возвращает true для безопасности)
+            await UserService.requestPasswordReset(email);
+
+            // Всегда возвращаем успешный ответ, даже если пользователь не найден
+            // Это предотвращает перебор email'ов
+            return res.status(200).json({
+                message: 'Если указанный email существует в системе, на него было отправлено письмо с инструкциями по восстановлению пароля.',
+            });
+        } catch (error: any) {
+            console.error('Error requesting password reset:', error);
+            return res.status(500).json({
+                message: 'Ошибка при запросе восстановления пароля',
+                error: error.message || 'Unknown error',
+            });
+        }
+    }
+
+    /**
+     * Сбрасывает пароль по токену восстановления
+     * POST /api/auth/reset-password
+     * Body: { token: string, password: string }
+     */
+    async resetPassword(req: Request, res: Response): Promise<Response | void> {
+        try {
+            const { token, password } = req.body;
+
+            if (!token || typeof token !== 'string') {
+                return res.status(400).json({ message: 'Токен восстановления обязателен' });
+            }
+
+            if (!password || typeof password !== 'string') {
+                return res.status(400).json({ message: 'Новый пароль обязателен' });
+            }
+
+            // Сбрасываем пароль
+            const result = await UserService.resetPassword(token, password);
+
+            if (!result.success) {
+                return res.status(400).json({ message: result.message });
+            }
+
+            return res.status(200).json({
+                message: result.message,
+            });
+        } catch (error: any) {
+            console.error('Error resetting password:', error);
+            return res.status(500).json({
+                message: 'Ошибка при сбросе пароля',
+                error: error.message || 'Unknown error',
+            });
+        }
+    }
 }
 export default new UserController();
