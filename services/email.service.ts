@@ -341,9 +341,12 @@ class EmailService {
     async sendPasswordResetEmail(email: string, resetToken: string, resetUrl: string): Promise<boolean> {
         const subject = 'Восстановление пароля - AI Content Curator';
         
+        // Извлекаем код из токена (первые 8 символов)
+        const resetCode = resetToken.substring(0, 8).toUpperCase();
+        
         // Определяем базовый URL для ссылки восстановления
         const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
-        const fullResetUrl = `${baseUrl}/reset-password?token=${resetToken}`;
+        const fullResetUrl = `${baseUrl}/reset-password?email=${encodeURIComponent(email)}&code=${resetCode}`;
 
         const html = `
             <!DOCTYPE html>
@@ -360,7 +363,18 @@ class EmailService {
                 <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
                     <h2 style="color: #1E293B; margin-top: 0;">Восстановление пароля</h2>
                     <p>Вы запросили восстановление пароля для вашего аккаунта.</p>
-                    <p>Для сброса пароля нажмите на кнопку ниже:</p>
+                    
+                    <div style="background: #f0f9ff; padding: 20px; border-radius: 8px; border: 2px solid #4ECDC4; margin: 20px 0; text-align: center;">
+                        <p style="color: #666; font-size: 14px; margin-bottom: 10px;">Ваш код восстановления:</p>
+                        <p style="font-family: monospace; font-size: 32px; font-weight: 700; color: #1E293B; letter-spacing: 0.2em; margin: 10px 0;">
+                            ${resetCode}
+                        </p>
+                        <p style="color: #666; font-size: 12px; margin-top: 10px;">
+                            Код действителен в течение 30 минут
+                        </p>
+                    </div>
+                    
+                    <p>Для сброса пароля используйте код выше или нажмите на кнопку ниже:</p>
                     <div style="text-align: center; margin: 30px 0;">
                         <a href="${fullResetUrl}" 
                            style="display: inline-block; background: linear-gradient(135deg, #4ECDC4 0%, #95E1D3 100%); 
@@ -374,7 +388,7 @@ class EmailService {
                         <a href="${fullResetUrl}" style="color: #4ECDC4; word-break: break-all;">${fullResetUrl}</a>
                     </p>
                     <p style="color: #999; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">
-                        <strong>Важно:</strong> Эта ссылка действительна в течение 1 часа. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+                        <strong>Важно:</strong> Код действителен в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
                     </p>
                 </div>
             </body>
@@ -386,10 +400,13 @@ class EmailService {
 
 Вы запросили восстановление пароля для вашего аккаунта.
 
+Ваш код восстановления: ${resetCode}
+Код действителен в течение 30 минут.
+
 Для сброса пароля перейдите по ссылке:
 ${fullResetUrl}
 
-Важно: Эта ссылка действительна в течение 1 часа. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+Важно: Код действителен в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
         `;
 
         return await this.sendEmail({
