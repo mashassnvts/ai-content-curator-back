@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import axios from 'axios';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -24,14 +25,26 @@ class EmailService {
         const emailUser = process.env.EMAIL_USER;
         const emailPassword = process.env.EMAIL_PASSWORD;
         const emailFrom = process.env.EMAIL_FROM || emailUser || 'noreply@ai-content-curator.com';
+        
+        // Проверяем наличие Resend API ключа (рекомендуется для Railway)
+        const resendApiKey = process.env.RESEND_API_KEY;
 
         // Диагностика: выводим что было найдено (без пароля)
         console.log('📧 Email configuration check:');
+        console.log(`   RESEND_API_KEY: ${resendApiKey ? '✓ (set) - Using Resend API' : '✗ (not set)'}`);
         console.log(`   EMAIL_HOST: ${emailHost ? '✓' : '✗'} ${emailHost || '(not set)'}`);
         console.log(`   EMAIL_PORT: ${emailPort ? '✓' : '✗'} ${emailPort || '(not set)'}`);
         console.log(`   EMAIL_USER: ${emailUser ? '✓' : '✗'} ${emailUser || '(not set)'}`);
         console.log(`   EMAIL_PASSWORD: ${emailPassword ? '✓ (set)' : '✗ (not set)'}`);
         console.log(`   EMAIL_FROM: ${emailFrom || '(not set)'}`);
+        
+        // Если есть Resend API ключ - используем его (работает на любом плане Railway)
+        if (resendApiKey) {
+            console.log('📧 Using Resend API for email delivery (works on all Railway plans)');
+            // Transporter будет null, отправка через Resend API
+            this.transporter = null;
+            return;
+        }
 
         // Если нет конфигурации - используем тестовый режим (для разработки)
         if (!emailHost || !emailUser || !emailPassword) {
@@ -166,9 +179,77 @@ class EmailService {
     }
 
     /**
-     * Отправляет email
+     * Отправляет email через Resend API (если настроен) или SMTP
      */
     async sendEmail(options: EmailOptions): Promise<boolean> {
+        const resendApiKey = process.env.RESEND_API_KEY;
+        
+        // Если настроен Resend API - используем его (работает на любом плане Railway)
+        if (resendApiKey) {
+            return await this.sendEmailViaResend(options, resendApiKey);
+        }
+
+        return await this.sendEmailViaSMTP(options);
+    }
+
+    /**
+     * Отправляет email через Resend API
+     */
+    private async sendEmailViaResend(options: EmailOptions, apiKey: string): Promise<boolean> {
+        const cleanApiKey = apiKey.replace(/^["'\s]+|["'\s]+$/g, '');
+        let emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'onboarding@resend.dev';
+        emailFrom = emailFrom.replace(/^["'\s]+|["'\s]+$/g, '');
+
+        try {
+            console.log(`📧 Attempting to send email via Resend API to ${options.to}...`);
+            console.log(`   From: ${emailFrom}`);
+            console.log(`   Subject: ${options.subject}`);
+
+            const response = await axios.post(
+                'https://api.resend.com/emails',
+                {
+                    from: `AI Content Curator <${emailFrom}>`,
+                    to: options.to,
+                    subject: options.subject,
+                    html: options.html,
+                    text: options.text || options.html.replace(/<[^>]*>/g, ''),
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${cleanApiKey}`,
+                        'Content-Type': 'application/json',
+                    },
+                    timeout: 30000, // 30 секунд таймаут
+                }
+            );
+
+            console.log(`✅ Email sent successfully via Resend API to ${options.to}`);
+            console.log(`   Message ID: ${response.data.id}`);
+            return true;
+        } catch (error: any) {
+            console.error(`❌ Failed to send email via Resend API to ${options.to}`);
+            if (error.response) {
+                console.error(`   Status: ${error.response.status}`);
+                console.error(`   Error: ${JSON.stringify(error.response.data)}`);
+            } else {
+                console.error(`   Error: ${error.message}`);
+            }
+            
+            if (error.response?.status === 401 || error.response?.status === 403) {
+                console.error('💡 Resend API authentication error. Check your RESEND_API_KEY.');
+                console.error('   Get API key: https://resend.com/api-keys');
+            }
+            
+            return false;
+        }
+    }
+
+    /**
+     * Отправляет email через SMTP
+     */
+    private async sendEmailViaSMTP(options: EmailOptions): Promise<boolean> {
+
+        // Иначе используем SMTP
         if (!this.transporter) {
             console.error('❌ Email transporter not initialized');
             console.error('   Attempting to reinitialize...');
@@ -184,7 +265,7 @@ class EmailService {
         emailFrom = emailFrom.replace(/^["'\s]+|["'\s]+$/g, '');
 
         try {
-            console.log(`📧 Attempting to send email to ${options.to}...`);
+            console.log(`📧 Attempting to send email via SMTP to ${options.to}...`);
             console.log(`   From: ${emailFrom}`);
             console.log(`   Subject: ${options.subject}`);
             
