@@ -25,13 +25,21 @@ class EmailService {
         const emailPassword = process.env.EMAIL_PASSWORD;
         const emailFrom = process.env.EMAIL_FROM || emailUser || 'noreply@ai-content-curator.com';
 
+        // Диагностика: выводим что было найдено (без пароля)
+        console.log('📧 Email configuration check:');
+        console.log(`   EMAIL_HOST: ${emailHost ? '✓' : '✗'} ${emailHost || '(not set)'}`);
+        console.log(`   EMAIL_PORT: ${emailPort ? '✓' : '✗'} ${emailPort || '(not set)'}`);
+        console.log(`   EMAIL_USER: ${emailUser ? '✓' : '✗'} ${emailUser || '(not set)'}`);
+        console.log(`   EMAIL_PASSWORD: ${emailPassword ? '✓ (set)' : '✗ (not set)'}`);
+        console.log(`   EMAIL_FROM: ${emailFrom || '(not set)'}`);
+
         // Если нет конфигурации - используем тестовый режим (для разработки)
         if (!emailHost || !emailUser || !emailPassword) {
             console.warn('⚠️ Email configuration not found. Using test mode (emails will be logged, not sent).');
             console.warn('💡 Set EMAIL_HOST, EMAIL_PORT, EMAIL_USER, EMAIL_PASSWORD, EMAIL_FROM in .env to enable email sending.');
             
             // Создаем тестовый transporter (для разработки)
-            this.transporter = nodemailer.createTransporter({
+            this.transporter = nodemailer.createTransport({
                 host: 'smtp.ethereal.email',
                 port: 587,
                 secure: false,
@@ -47,12 +55,21 @@ class EmailService {
         const port = emailPort ? parseInt(emailPort, 10) : 587;
         const secure = port === 465;
 
-        // Убираем кавычки из значений, если они есть
-        const cleanHost = emailHost.replace(/^["']|["']$/g, '');
-        const cleanUser = emailUser.replace(/^["']|["']$/g, '');
-        const cleanPassword = emailPassword.replace(/^["']|["']$/g, '');
+        // Убираем кавычки и пробелы из значений, если они есть
+        const cleanHost = emailHost.replace(/^["'\s]+|["'\s]+$/g, '');
+        const cleanUser = emailUser.replace(/^["'\s]+|["'\s]+$/g, '');
+        const cleanPassword = emailPassword.replace(/^["'\s]+|["'\s]+$/g, '');
 
-        this.transporter = nodemailer.createTransporter({
+        // Проверяем формат пароля (Gmail App Password должен быть без пробелов)
+        if (cleanPassword.includes(' ') && cleanHost.includes('gmail')) {
+            console.warn('⚠️ Warning: Gmail App Password contains spaces. App Passwords should not have spaces.');
+            console.warn('   Make sure you copied the App Password correctly from Google Account settings.');
+        }
+
+        console.log(`📧 Initializing email transporter: ${cleanHost}:${port} (secure: ${secure})`);
+        console.log(`   User: ${cleanUser}`);
+
+        this.transporter = nodemailer.createTransport({
             host: cleanHost,
             port: port,
             secure: secure,
@@ -63,17 +80,38 @@ class EmailService {
             tls: {
                 rejectUnauthorized: false, // Для самоподписанных сертификатов
             },
+            // Дополнительные опции для Gmail
+            ...(cleanHost.includes('gmail') && {
+                service: 'gmail', // Используем service вместо host для Gmail
+            }),
         });
 
-        // Проверяем подключение при инициализации
-        this.transporter.verify((error, success) => {
-            if (error) {
-                console.error('❌ Email service verification failed:', error.message);
-                console.error('   Check your EMAIL_HOST, EMAIL_PORT, EMAIL_USER, and EMAIL_PASSWORD settings');
-            } else {
-                console.log(`✅ Email service initialized and verified (${cleanHost}:${port})`);
-            }
-        });
+        // Проверяем подключение при инициализации (асинхронно, не блокируем запуск)
+        if (this.transporter) {
+            this.transporter.verify((error: any, success: any) => {
+                if (error) {
+                    console.error('❌ Email service verification failed:', error.message);
+                    if (error.code) {
+                        console.error(`   Error code: ${error.code}`);
+                    }
+                    console.error('   Check your EMAIL_HOST, EMAIL_PORT, EMAIL_USER, and EMAIL_PASSWORD settings');
+                    
+                    // Специфичные подсказки для Gmail
+                    if (cleanHost.includes('gmail')) {
+                        console.error('💡 Gmail troubleshooting:');
+                        console.error('   1. Make sure you are using an App Password (not your regular password)');
+                        console.error('   2. Enable 2-Step Verification: https://myaccount.google.com/security');
+                        console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
+                        console.error('   4. Check if "Less secure app access" is enabled (if using regular password)');
+                        if (error.code === 'EAUTH') {
+                            console.error('   5. Authentication failed - double-check your App Password');
+                        }
+                    }
+                } else {
+                    console.log(`✅ Email service initialized and verified (${cleanHost}:${port})`);
+                }
+            });
+        }
     }
 
     /**
