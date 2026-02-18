@@ -69,22 +69,39 @@ class EmailService {
         console.log(`📧 Initializing email transporter: ${cleanHost}:${port} (secure: ${secure})`);
         console.log(`   User: ${cleanUser}`);
 
-        this.transporter = nodemailer.createTransport({
-            host: cleanHost,
-            port: port,
-            secure: secure,
-            auth: {
-                user: cleanUser,
-                pass: cleanPassword,
-            },
-            tls: {
-                rejectUnauthorized: false, // Для самоподписанных сертификатов
-            },
-            // Дополнительные опции для Gmail
-            ...(cleanHost.includes('gmail') && {
-                service: 'gmail', // Используем service вместо host для Gmail
-            }),
-        });
+        // Для Gmail используем специальную конфигурацию
+        if (cleanHost.includes('gmail')) {
+            console.log('   Using Gmail service configuration');
+            this.transporter = nodemailer.createTransport({
+                service: 'gmail', // Используем service для Gmail (автоматически настраивает host и port)
+                auth: {
+                    user: cleanUser,
+                    pass: cleanPassword,
+                },
+                // Увеличиваем таймауты для подключения
+                connectionTimeout: 60000, // 60 секунд на подключение
+                greetingTimeout: 30000, // 30 секунд на приветствие
+                socketTimeout: 60000, // 60 секунд на операции
+            });
+        } else {
+            // Для других SMTP серверов используем стандартную конфигурацию
+            this.transporter = nodemailer.createTransport({
+                host: cleanHost,
+                port: port,
+                secure: secure,
+                auth: {
+                    user: cleanUser,
+                    pass: cleanPassword,
+                },
+                tls: {
+                    rejectUnauthorized: false, // Для самоподписанных сертификатов
+                },
+                // Увеличиваем таймауты
+                connectionTimeout: 60000,
+                greetingTimeout: 30000,
+                socketTimeout: 60000,
+            });
+        }
 
         // Проверяем подключение при инициализации (асинхронно, не блокируем запуск)
         if (this.transporter) {
@@ -137,7 +154,7 @@ class EmailService {
             console.log(`   From: ${emailFrom}`);
             console.log(`   Subject: ${options.subject}`);
             
-            // Добавляем таймаут для отправки email (30 секунд)
+            // Добавляем таймаут для отправки email (60 секунд для Gmail)
             const sendPromise = this.transporter.sendMail({
                 from: `"AI Content Curator" <${emailFrom}>`,
                 to: options.to,
@@ -147,7 +164,7 @@ class EmailService {
             });
 
             const timeoutPromise = new Promise((_, reject) => {
-                setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000);
+                setTimeout(() => reject(new Error('Email send timeout after 60 seconds')), 60000);
             });
 
             const info = await Promise.race([sendPromise, timeoutPromise]) as any;
