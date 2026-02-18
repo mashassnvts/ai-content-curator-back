@@ -334,18 +334,26 @@ class UserService {
 
         // Отправляем email с токеном восстановления
         console.log(`📧 Sending password reset email to ${normalizedEmail}...`);
-        const emailSent = await emailService.sendPasswordResetEmail(
-            normalizedEmail,
-            resetToken,
-            '' // URL будет сформирован в email.service
-        );
+        try {
+            const emailSent = await emailService.sendPasswordResetEmail(
+                normalizedEmail,
+                resetToken,
+                '' // URL будет сформирован в email.service
+            );
 
-        if (!emailSent) {
-            console.error(`❌ Failed to send password reset email to ${normalizedEmail}`);
-            console.error(`   Token was generated but email was not sent. User can request again.`);
-            // Не удаляем токен, если email не отправлен - пользователь может попробовать еще раз
-        } else {
-            console.log(`✅ Password reset email sent successfully to ${normalizedEmail}`);
+            if (!emailSent) {
+                console.error(`❌ Failed to send password reset email to ${normalizedEmail}`);
+                console.error(`   Token was generated but email was not sent. User can request again.`);
+                // Не удаляем токен, если email не отправлен - пользователь может попробовать еще раз
+            } else {
+                console.log(`✅ Password reset email sent successfully to ${normalizedEmail}`);
+            }
+        } catch (emailError: any) {
+            console.error(`❌ Exception while sending password reset email to ${normalizedEmail}:`, emailError.message);
+            console.error(`   Token was generated but email sending failed. User can request again.`);
+            if (emailError.stack) {
+                console.error(`   Stack: ${emailError.stack.substring(0, 300)}`);
+            }
         }
 
         return true; // Всегда возвращаем true для безопасности

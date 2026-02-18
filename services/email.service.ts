@@ -120,7 +120,12 @@ class EmailService {
     async sendEmail(options: EmailOptions): Promise<boolean> {
         if (!this.transporter) {
             console.error('❌ Email transporter not initialized');
-            return false;
+            console.error('   Attempting to reinitialize...');
+            this.initializeTransporter();
+            if (!this.transporter) {
+                console.error('   Failed to initialize transporter');
+                return false;
+            }
         }
 
         let emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@ai-content-curator.com';
@@ -132,13 +137,20 @@ class EmailService {
             console.log(`   From: ${emailFrom}`);
             console.log(`   Subject: ${options.subject}`);
             
-            const info = await this.transporter.sendMail({
+            // Добавляем таймаут для отправки email (30 секунд)
+            const sendPromise = this.transporter.sendMail({
                 from: `"AI Content Curator" <${emailFrom}>`,
                 to: options.to,
                 subject: options.subject,
                 text: options.text || options.html.replace(/<[^>]*>/g, ''), // Убираем HTML теги для текстовой версии
                 html: options.html,
             });
+
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Email send timeout after 30 seconds')), 30000);
+            });
+
+            const info = await Promise.race([sendPromise, timeoutPromise]) as any;
 
             console.log(`✅ Email sent successfully to ${options.to}`);
             console.log(`   Message ID: ${info.messageId}`);
@@ -153,7 +165,8 @@ class EmailService {
 
             return true;
         } catch (error: any) {
-            console.error(`❌ Failed to send email to ${options.to}:`, error.message);
+            console.error(`❌ Failed to send email to ${options.to}`);
+            console.error(`   Error: ${error.message || 'Unknown error'}`);
             if (error.code) {
                 console.error(`   Error code: ${error.code}`);
             }
@@ -163,16 +176,27 @@ class EmailService {
             if (error.response) {
                 console.error(`   Response: ${error.response}`);
             }
+            if (error.command) {
+                console.error(`   Command: ${error.command}`);
+            }
+            if (error.responseCode === 535 || error.message?.includes('535')) {
+                console.error('   This is an authentication error (535)');
+            }
             if (error.stack) {
-                console.error('   Stack:', error.stack);
+                console.error('   Stack:', error.stack.substring(0, 500)); // Ограничиваем длину стека
             }
             
             // Дополнительные подсказки для Gmail
-            if (error.code === 'EAUTH' || error.message?.includes('Invalid login')) {
+            if (error.code === 'EAUTH' || error.message?.includes('Invalid login') || error.responseCode === 535) {
                 console.error('💡 Gmail authentication error. Make sure:');
                 console.error('   1. You are using an App Password (not your regular Gmail password)');
                 console.error('   2. Enable 2-Step Verification in your Google Account');
                 console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
+                console.error('   4. Copy the App Password WITHOUT spaces (16 characters, no spaces)');
+            }
+            
+            if (error.message?.includes('timeout')) {
+                console.error('💡 Email send timed out. Check your network connection and SMTP server.');
             }
             
             return false;
