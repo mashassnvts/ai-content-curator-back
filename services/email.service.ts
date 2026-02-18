@@ -186,7 +186,20 @@ class EmailService {
         
         // Если настроен Resend API - используем его (работает на любом плане Railway)
         if (resendApiKey) {
-            return await this.sendEmailViaResend(options, resendApiKey);
+            const resendResult = await this.sendEmailViaResend(options, resendApiKey);
+            // Если Resend вернул true - успешно отправлено
+            if (resendResult) {
+                return true;
+            }
+            // Если Resend не сработал (например, домен не верифицирован), пробуем SMTP как fallback
+            const emailHost = process.env.EMAIL_HOST;
+            if (emailHost) {
+                console.log('🔄 Resend API failed, attempting SMTP fallback...');
+                return await this.sendEmailViaSMTP(options);
+            }
+            // Если нет SMTP конфигурации, возвращаем false
+            console.error('❌ Resend API failed and no SMTP configuration found');
+            return false;
         }
 
         return await this.sendEmailViaSMTP(options);
@@ -197,8 +210,20 @@ class EmailService {
      */
     private async sendEmailViaResend(options: EmailOptions, apiKey: string): Promise<boolean> {
         const cleanApiKey = apiKey.replace(/^["'\s]+|["'\s]+$/g, '');
+        
+        // Resend требует верифицированный домен для кастомных email адресов
+        // Для тестирования всегда используем onboarding@resend.dev (работает без верификации)
+        // Если нужен кастомный домен - верифицируйте его на https://resend.com/domains
         let emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'onboarding@resend.dev';
         emailFrom = emailFrom.replace(/^["'\s]+|["'\s]+$/g, '');
+        
+        // Если используется кастомный домен (не resend.dev/resend.com), переключаемся на тестовый
+        if (!emailFrom.includes('@resend.dev') && !emailFrom.includes('@resend.com')) {
+            console.warn(`⚠️ Custom domain detected in EMAIL_FROM: ${emailFrom}`);
+            console.warn(`   Resend requires domain verification. Using test domain: onboarding@resend.dev`);
+            console.warn(`   To use custom domain, verify it at: https://resend.com/domains`);
+            emailFrom = 'onboarding@resend.dev';
+        }
 
         try {
             console.log(`📧 Attempting to send email via Resend API to ${options.to}...`);
@@ -231,6 +256,15 @@ class EmailService {
             if (error.response) {
                 console.error(`   Status: ${error.response.status}`);
                 console.error(`   Error: ${JSON.stringify(error.response.data)}`);
+                
+                // Если домен не верифицирован - предлагаем варианты решения
+                if (error.response.status === 403 && error.response.data?.message?.includes('domain is not verified')) {
+                    console.error('💡 Domain verification error:');
+                    console.error('   Option 1: Verify your domain at https://resend.com/domains');
+                    console.error('   Option 2: Use SMTP instead (SMTP will be used as fallback automatically)');
+                    console.error('   Option 3: Use test domain onboarding@resend.dev (will be used automatically)');
+                    // Fallback на SMTP будет выполнен в методе sendEmail
+                }
             } else {
                 console.error(`   Error: ${error.message}`);
             }
