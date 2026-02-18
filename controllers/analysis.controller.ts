@@ -1060,7 +1060,15 @@ const runAnalysisInBackground = async (
         const allUrls = new Set<string>();
         for (const url of urls) {
             const playlistMatch = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
-            if (playlistMatch?.[1]) {
+            const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
+            
+            // Если есть и v= и list= - это конкретное видео из плейлиста, анализируем только его
+            if (playlistMatch?.[1] && videoMatch?.[1]) {
+                // Это конкретное видео из плейлиста - анализируем только его
+                allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
+            } 
+            // Если есть только list= без v= - это плейлист, получаем все видео
+            else if (playlistMatch?.[1] && !videoMatch?.[1]) {
                 try {
                     let playlist;
                     try {
@@ -1074,16 +1082,18 @@ const runAnalysisInBackground = async (
                             if (videoUrl) allUrls.add(videoUrl);
                         });
                     } else {
-                        const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
-                        if (videoMatch?.[1]) allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
-                        else allUrls.add(url);
+                        // Если не удалось получить плейлист, добавляем исходный URL
+                        allUrls.add(url);
                     }
                 } catch {
-                    const videoMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([^&\n?#]+)/);
-                    if (videoMatch?.[1]) allUrls.add(`https://www.youtube.com/watch?v=${videoMatch[1]}`);
-                    else allUrls.add(url);
+                    // Если ошибка при получении плейлиста, добавляем исходный URL
+                    allUrls.add(url);
                 }
-            } else allUrls.add(url);
+            } 
+            // Обычный URL без плейлиста
+            else {
+                allUrls.add(url);
+            }
         }
 
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
