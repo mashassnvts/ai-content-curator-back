@@ -329,8 +329,11 @@ class UserService {
         });
 
         console.log(`✅ Password reset token generated for user: ${normalizedEmail}`);
+        console.log(`   Token: ${resetToken.substring(0, 10)}...`);
+        console.log(`   Expires at: ${resetExpires.toISOString()}`);
 
         // Отправляем email с токеном восстановления
+        console.log(`📧 Sending password reset email to ${normalizedEmail}...`);
         const emailSent = await emailService.sendPasswordResetEmail(
             normalizedEmail,
             resetToken,
@@ -339,7 +342,10 @@ class UserService {
 
         if (!emailSent) {
             console.error(`❌ Failed to send password reset email to ${normalizedEmail}`);
+            console.error(`   Token was generated but email was not sent. User can request again.`);
             // Не удаляем токен, если email не отправлен - пользователь может попробовать еще раз
+        } else {
+            console.log(`✅ Password reset email sent successfully to ${normalizedEmail}`);
         }
 
         return true; // Всегда возвращаем true для безопасности

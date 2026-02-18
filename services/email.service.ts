@@ -47,20 +47,33 @@ class EmailService {
         const port = emailPort ? parseInt(emailPort, 10) : 587;
         const secure = port === 465;
 
+        // Убираем кавычки из значений, если они есть
+        const cleanHost = emailHost.replace(/^["']|["']$/g, '');
+        const cleanUser = emailUser.replace(/^["']|["']$/g, '');
+        const cleanPassword = emailPassword.replace(/^["']|["']$/g, '');
+
         this.transporter = nodemailer.createTransporter({
-            host: emailHost,
+            host: cleanHost,
             port: port,
             secure: secure,
             auth: {
-                user: emailUser,
-                pass: emailPassword,
+                user: cleanUser,
+                pass: cleanPassword,
             },
             tls: {
                 rejectUnauthorized: false, // Для самоподписанных сертификатов
             },
         });
 
-        console.log(`✅ Email service initialized (${emailHost}:${port})`);
+        // Проверяем подключение при инициализации
+        this.transporter.verify((error, success) => {
+            if (error) {
+                console.error('❌ Email service verification failed:', error.message);
+                console.error('   Check your EMAIL_HOST, EMAIL_PORT, EMAIL_USER, and EMAIL_PASSWORD settings');
+            } else {
+                console.log(`✅ Email service initialized and verified (${cleanHost}:${port})`);
+            }
+        });
     }
 
     /**
@@ -72,9 +85,15 @@ class EmailService {
             return false;
         }
 
-        const emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@ai-content-curator.com';
+        let emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@ai-content-curator.com';
+        // Убираем кавычки и пробелы
+        emailFrom = emailFrom.replace(/^["'\s]+|["'\s]+$/g, '');
 
         try {
+            console.log(`📧 Attempting to send email to ${options.to}...`);
+            console.log(`   From: ${emailFrom}`);
+            console.log(`   Subject: ${options.subject}`);
+            
             const info = await this.transporter.sendMail({
                 from: `"AI Content Curator" <${emailFrom}>`,
                 to: options.to,
@@ -97,9 +116,27 @@ class EmailService {
             return true;
         } catch (error: any) {
             console.error(`❌ Failed to send email to ${options.to}:`, error.message);
+            if (error.code) {
+                console.error(`   Error code: ${error.code}`);
+            }
+            if (error.responseCode) {
+                console.error(`   Response code: ${error.responseCode}`);
+            }
+            if (error.response) {
+                console.error(`   Response: ${error.response}`);
+            }
             if (error.stack) {
                 console.error('   Stack:', error.stack);
             }
+            
+            // Дополнительные подсказки для Gmail
+            if (error.code === 'EAUTH' || error.message?.includes('Invalid login')) {
+                console.error('💡 Gmail authentication error. Make sure:');
+                console.error('   1. You are using an App Password (not your regular Gmail password)');
+                console.error('   2. Enable 2-Step Verification in your Google Account');
+                console.error('   3. Generate App Password: https://myaccount.google.com/apppasswords');
+            }
+            
             return false;
         }
     }
