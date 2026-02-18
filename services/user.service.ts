@@ -334,10 +334,26 @@ class UserService {
         console.log(`   Code: ${resetCode}`);
         console.log(`   Expires at: ${resetExpires.toISOString()}`);
 
-        // Возвращаем код для отображения на странице
+        // Отправляем email с кодом восстановления
+        const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
+        const resetUrl = `${baseUrl}/reset-password?email=${encodeURIComponent(normalizedEmail)}&code=${resetCode}`;
+        
+        try {
+            const emailSent = await emailService.sendPasswordResetEmail(normalizedEmail, resetToken, resetUrl);
+            if (emailSent) {
+                console.log(`📧 Password reset email sent successfully to ${normalizedEmail}`);
+            } else {
+                console.warn(`⚠️ Failed to send password reset email to ${normalizedEmail}, but code is still available on the page`);
+            }
+        } catch (emailError: any) {
+            console.error(`❌ Error sending password reset email to ${normalizedEmail}:`, emailError.message);
+            // Не прерываем процесс - код все равно показывается на странице
+        }
+
+        // Возвращаем код для отображения на странице (временно для тестирования)
         return { 
             success: true, 
-            resetCode: resetCode,
+            resetCode: resetCode, // Временно выводим код на клиенте для тестирования
             expiresAt: resetExpires
         };
     }
