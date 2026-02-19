@@ -393,11 +393,12 @@ class UserController {
                 return res.status(400).json({ message: 'Неверный формат email' });
             }
 
-            // Запрашиваем восстановление пароля (отправляет Magic Link на email)
+            // Запрашиваем восстановление пароля (отправляет Magic Link на email и возвращает код)
             const result = await UserService.requestPasswordReset(email);
 
             console.log('📋 Password reset request result:', {
                 success: result.success,
+                resetCode: result.resetCode,
                 expiresAt: result.expiresAt,
             });
 
@@ -409,9 +410,10 @@ class UserController {
                 });
             }
 
-            // Возвращаем успешный ответ (Magic Link отправлен на email)
+            // Возвращаем успешный ответ (Magic Link отправлен на email + код для отображения)
             const responseData = {
                 success: true,
+                resetCode: result.resetCode, // Код для отображения на странице
                 expiresAt: result.expiresAt ? result.expiresAt.toISOString() : null,
                 message: 'Ссылка для восстановления пароля отправлена на вашу почту.',
             };
