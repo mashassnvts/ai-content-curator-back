@@ -6,6 +6,7 @@ import ContentRelevanceScore from '../models/ContentRelevanceScore';
 import contentService from '../services/content.service';
 import { analyzeRelevanceLevel } from '../services/relevance-level.service';
 import UserInterestLevel from '../models/UserInterestLevel';
+import { extractThemes, saveUserSemanticTags, saveUserSemanticTagsWithWeight, clearUserTagsCache } from '../services/semantic.service';
 
 export const addFeedback = async (req: AuthenticatedRequest, res: Response) => {
     const { analysisHistoryId, wasCorrect, comment } = req.body;
@@ -95,6 +96,32 @@ export const addFeedback = async (req: AuthenticatedRequest, res: Response) => {
                                 }
                             }
                         }
+                    }
+
+                    // Сохраняем темы в облако смыслов при ЛЮБОМ положительном feedback (лайк)
+                    // Это основной способ формирования облака: пользователь отметил "понравилось" → темы сохраняются
+                    // Работает независимо от наличия уровней интересов
+                    try {
+                        const contentForThemes = (historyEntry.summary || '') + ' ' + (historyEntry.reasoning || '') + ' ' + (historyEntry.originalText || '');
+                        if (contentForThemes.trim().length >= 50) {
+                            const themes = await extractThemes(contentForThemes);
+                            if (themes.length > 0) {
+                                // Если пользователь написал комментарий "почему понравилось" — темы из комментария получают больший вес
+                                const userComment = (comment || '').trim();
+                                if (userComment.length >= 10) {
+                                    const commentThemes = await extractThemes(userComment);
+                                    if (commentThemes.length > 0) {
+                                        await saveUserSemanticTagsWithWeight(userId, commentThemes, 2.0);
+                                        console.log(`✅ [Feedback] Saved ${commentThemes.length} semantic tags from comment (weight 2.0) - user explained why they liked it`);
+                                    }
+                                }
+                                await saveUserSemanticTags(userId, themes);
+                                clearUserTagsCache(userId);
+                                console.log(`✅ [Feedback] Saved ${themes.length} semantic tags to cloud from positive feedback (like)`);
+                            }
+                        }
+                    } catch (semanticError: any) {
+                        console.warn(`⚠️ Failed to save semantic tags from feedback: ${semanticError.message}`);
                     }
                 } catch (error: any) {
                     console.warn(`⚠️ Failed to update relevance scores after feedback: ${error.message}`);
