@@ -299,9 +299,9 @@ class UserService {
 
     /**
      * Запрашивает восстановление пароля для пользователя
-     * Генерирует код восстановления и возвращает его (без отправки email)
+     * Генерирует токен и отправляет Magic Link на email
      */
-    async requestPasswordReset(email: string): Promise<{ success: boolean; resetCode?: string; expiresAt?: Date }> {
+    async requestPasswordReset(email: string): Promise<{ success: boolean; expiresAt?: Date }> {
         // Нормализуем email
         const normalizedEmail = email.trim().toLowerCase();
         
@@ -317,10 +317,7 @@ class UserService {
         // Генерируем полный токен для хранения в БД (32 байта = 64 hex символа)
         const resetToken = crypto.randomBytes(32).toString('hex');
         
-        // Генерируем короткий код восстановления из первых 8 символов токена
-        const resetCode = resetToken.substring(0, 8).toUpperCase(); // 8 символов в верхнем регистре
-        
-        // Устанавливаем время истечения кода (30 минут)
+        // Устанавливаем время истечения токена (30 минут)
         const resetExpires = new Date();
         resetExpires.setMinutes(resetExpires.getMinutes() + 30);
 
@@ -330,38 +327,38 @@ class UserService {
             password_reset_expires_at: resetExpires,
         });
 
-        console.log(`✅ Password reset code generated for user: ${normalizedEmail}`);
-        console.log(`   Code: ${resetCode}`);
+        console.log(`✅ Password reset token generated for user: ${normalizedEmail}`);
+        console.log(`   Token: ${resetToken.substring(0, 16)}...`);
         console.log(`   Expires at: ${resetExpires.toISOString()}`);
 
-        // Отправляем email с кодом восстановления
+        // Формируем Magic Link с токеном
         const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
-        const resetUrl = `${baseUrl}/reset-password?email=${encodeURIComponent(normalizedEmail)}&code=${resetCode}`;
+        const resetUrl = `${baseUrl}/reset-password?token=${resetToken}&email=${encodeURIComponent(normalizedEmail)}`;
         
+        // Отправляем email с Magic Link
         try {
             const emailSent = await emailService.sendPasswordResetEmail(normalizedEmail, resetToken, resetUrl);
             if (emailSent) {
-                console.log(`📧 Password reset email sent successfully to ${normalizedEmail}`);
+                console.log(`📧 Password reset email with Magic Link sent successfully to ${normalizedEmail}`);
             } else {
-                console.warn(`⚠️ Failed to send password reset email to ${normalizedEmail}, but code is still available on the page`);
+                console.warn(`⚠️ Failed to send password reset email to ${normalizedEmail}`);
             }
         } catch (emailError: any) {
             console.error(`❌ Error sending password reset email to ${normalizedEmail}:`, emailError.message);
-            // Не прерываем процесс - код все равно показывается на странице
+            // Не прерываем процесс - ссылка отправлена
         }
 
-        // Возвращаем код для отображения на странице (временно для тестирования)
+        // Возвращаем только success и время истечения (без кода)
         return { 
             success: true, 
-            resetCode: resetCode, // Временно выводим код на клиенте для тестирования
             expiresAt: resetExpires
         };
     }
 
     /**
-     * Сбрасывает пароль пользователя по коду восстановления
+     * Сбрасывает пароль пользователя по токену восстановления (Magic Link)
      */
-    async resetPassword(email: string, resetCode: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    async resetPassword(email: string, resetToken: string, newPassword: string): Promise<{ success: boolean; message: string }> {
         // Нормализуем email
         const normalizedEmail = email.trim().toLowerCase();
         
@@ -375,7 +372,7 @@ class UserService {
         if (!user || !user.password_reset_token) {
             return {
                 success: false,
-                message: 'Неверный email или код восстановления не был запрошен.',
+                message: 'Неверный email или ссылка восстановления не была запрошена.',
             };
         }
 
@@ -388,19 +385,15 @@ class UserService {
             });
             return {
                 success: false,
-                message: 'Код восстановления пароля истек. Запросите новый.',
+                message: 'Ссылка восстановления пароля истекла. Запросите новую.',
             };
         }
 
-        // Генерируем код из сохраненного токена для проверки
-        // Используем первые 8 символов токена в верхнем регистре
-        const expectedCode = user.password_reset_token.substring(0, 8).toUpperCase();
-        
-        // Проверяем код (без учета регистра для удобства пользователя)
-        if (resetCode.toUpperCase() !== expectedCode) {
+        // Проверяем токен (полное совпадение)
+        if (resetToken !== user.password_reset_token) {
             return {
                 success: false,
-                message: 'Неверный код восстановления. Проверьте правильность ввода.',
+                message: 'Неверная ссылка восстановления. Используйте ссылку из письма.',
             };
         }
 
