@@ -370,17 +370,10 @@ class EmailService {
     }
 
     /**
-     * Отправляет письмо для восстановления пароля
+     * Отправляет письмо для восстановления пароля (Magic Link)
      */
     async sendPasswordResetEmail(email: string, resetToken: string, resetUrl: string): Promise<boolean> {
         const subject = 'Восстановление пароля - AI Content Curator';
-        
-        // Извлекаем код из токена (первые 8 символов)
-        const resetCode = resetToken.substring(0, 8).toUpperCase();
-        
-        // Определяем базовый URL для ссылки восстановления
-        const baseUrl = process.env.FRONTEND_URL || process.env.CLIENT_URL || 'http://localhost:3000';
-        const fullResetUrl = `${baseUrl}/reset-password?email=${encodeURIComponent(email)}&code=${resetCode}`;
 
         const html = `
             <!DOCTYPE html>
@@ -397,32 +390,30 @@ class EmailService {
                 <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
                     <h2 style="color: #1E293B; margin-top: 0;">Восстановление пароля</h2>
                     <p>Вы запросили восстановление пароля для вашего аккаунта.</p>
+                    <p>Для сброса пароля нажмите на кнопку ниже:</p>
                     
-                    <div style="background: #f0f9ff; padding: 20px; border-radius: 8px; border: 2px solid #4ECDC4; margin: 20px 0; text-align: center;">
-                        <p style="color: #666; font-size: 14px; margin-bottom: 10px;">Ваш код восстановления:</p>
-                        <p style="font-family: monospace; font-size: 32px; font-weight: 700; color: #1E293B; letter-spacing: 0.2em; margin: 10px 0;">
-                            ${resetCode}
-                        </p>
-                        <p style="color: #666; font-size: 12px; margin-top: 10px;">
-                            Код действителен в течение 30 минут
-                        </p>
-                    </div>
-                    
-                    <p>Для сброса пароля используйте код выше или нажмите на кнопку ниже:</p>
                     <div style="text-align: center; margin: 30px 0;">
-                        <a href="${fullResetUrl}" 
+                        <a href="${resetUrl}" 
                            style="display: inline-block; background: linear-gradient(135deg, #4ECDC4 0%, #95E1D3 100%); 
-                                  color: white; padding: 12px 30px; text-decoration: none; 
-                                  border-radius: 5px; font-weight: 600;">
+                                  color: white; padding: 15px 40px; text-decoration: none; 
+                                  border-radius: 5px; font-weight: 600; font-size: 16px;">
                             Восстановить пароль
                         </a>
                     </div>
+                    
                     <p style="color: #666; font-size: 14px;">
                         Или скопируйте и вставьте эту ссылку в браузер:<br>
-                        <a href="${fullResetUrl}" style="color: #4ECDC4; word-break: break-all;">${fullResetUrl}</a>
+                        <a href="${resetUrl}" style="color: #4ECDC4; word-break: break-all;">${resetUrl}</a>
                     </p>
-                    <p style="color: #999; font-size: 12px; margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">
-                        <strong>Важно:</strong> Код действителен в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+                    
+                    <div style="background: #fff3cd; padding: 15px; border-radius: 5px; border-left: 4px solid #ffc107; margin: 20px 0;">
+                        <p style="color: #856404; font-size: 13px; margin: 0;">
+                            <strong>⚠️ Важно:</strong> Эта ссылка действительна в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+                        </p>
+                    </div>
+                    
+                    <p style="color: #999; font-size: 12px; margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd;">
+                        Если кнопка не работает, скопируйте ссылку выше и вставьте её в адресную строку браузера.
                     </p>
                 </div>
             </body>
@@ -434,13 +425,10 @@ class EmailService {
 
 Вы запросили восстановление пароля для вашего аккаунта.
 
-Ваш код восстановления: ${resetCode}
-Код действителен в течение 30 минут.
-
 Для сброса пароля перейдите по ссылке:
-${fullResetUrl}
+${resetUrl}
 
-Важно: Код действителен в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
+Важно: Эта ссылка действительна в течение 30 минут. Если вы не запрашивали восстановление пароля, просто проигнорируйте это письмо.
         `;
 
         return await this.sendEmail({
