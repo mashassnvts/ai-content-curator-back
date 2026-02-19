@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { analyzeContent, guestAnalyzeContent, getAnalysisStatus, testExtractThemes, findSimilarArticlesEndpoint, getStageStats, postAskQuestion } from '../controllers/analysis.controller';
-import { getHistory, getHistoryItem, reanalyzeFromHistory } from '../controllers/history.controller';
+import { getHistory, getHistoryItem, reanalyzeFromHistory, deleteHistoryItem } from '../controllers/history.controller';
 import UserController from '../controllers/user.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 
@@ -16,6 +16,7 @@ router.post('/ask-question', postAskQuestion); // Вопросы по конте
 router.get('/history', authMiddleware, getHistory);
 router.get('/history/:id', authMiddleware, getHistoryItem);
 router.get('/history/:id/reanalyze', authMiddleware, reanalyzeFromHistory);
+router.delete('/history/:id', authMiddleware, deleteHistoryItem); // Удаление записи из истории и связанных тегов
 router.post('/history/:historyId/comment', authMiddleware, UserController.saveAnalysisComment); // Сохранение комментария к анализу
 
 export default router;
