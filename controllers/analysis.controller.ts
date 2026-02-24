@@ -532,6 +532,79 @@ export const processSingleUrlAnalysis = async (
             } as any;
         }
 
+        // Проверяем, является ли это ссылкой на профиль Twitter/X (fallback: если в цикле не распознали)
+        const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
+        const twitterProfileRegex = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+        const twitterProfileMatch = !urlNorm.includes('/status/') && urlNorm.match(twitterProfileRegex);
+        if (twitterProfileMatch) {
+            const twitterUsername = twitterProfileMatch[1].replace('@', '').trim();
+            const POSTS_TO_ANALYZE = 6;
+            let posts: Array<{ url: string; text?: string }> = [];
+            try {
+                posts = await contentService.getTwitterProfilePosts(twitterUsername, POSTS_TO_ANALYZE);
+            } catch (e) {
+                return {
+                    originalUrl: url,
+                    isChannel: true,
+                    isTwitterProfile: true,
+                    channelUsername: twitterUsername,
+                    channelAnalysis: {
+                        totalPosts: 0,
+                        relevantPosts: 0,
+                        posts: [],
+                        recommendation: `Не удалось получить твиты из профиля @${twitterUsername}. Возможно, профиль недоступен.`
+                    },
+                    channelUrl: `https://x.com/${twitterUsername}`,
+                    isComplete: true
+                } as any;
+            }
+            const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
+            let relevantCount = 0;
+            const userTags = userId ? await getUserTagsCached(userId) : [];
+            const contextForAnalysis = userTags.length > 0
+                ? userTags.map((t: { tag: string }) => t.tag).join(', ')
+                : userId
+                    ? (await UserInterest.findAll({ where: { userId, isActive: true } })).map((ui: { interest: string }) => ui.interest).join(', ')
+                    : interests;
+            for (let j = 0; j < posts.length; j++) {
+                try {
+                    const res = await processSingleUrlAnalysis(posts[j].url, contextForAnalysis, feedbackHistory, userId, mode, jobId, j, true) as any;
+                    if (res && typeof res.score === 'number' && typeof res.verdict === 'string') {
+                        analyzedPosts.push({
+                            url: posts[j].url,
+                            score: res.score,
+                            verdict: res.verdict,
+                            summary: res.summary,
+                            reasoning: res.reasoning,
+                            text: posts[j].text
+                        });
+                        if (res.score >= 70) relevantCount++;
+                    }
+                } catch (err) {
+                    // skip failed tweet
+                }
+            }
+            const finalRecommendation = analyzedPosts.length === 0
+                ? 'Не удалось проанализировать твиты.'
+                : relevantCount === 0
+                    ? `Проанализировано ${analyzedPosts.length} твитов. Ни один не совпадает с вашими интересами.`
+                    : `Проанализировано ${analyzedPosts.length} твитов. Найдено ${relevantCount} релевантных.`;
+            return {
+                originalUrl: url,
+                isChannel: true,
+                isTwitterProfile: true,
+                channelUsername: twitterUsername,
+                channelAnalysis: {
+                    totalPosts: analyzedPosts.length,
+                    relevantPosts: relevantCount,
+                    posts: analyzedPosts,
+                    recommendation: finalRecommendation
+                },
+                channelUrl: `https://x.com/${twitterUsername}`,
+                isComplete: true
+            } as any;
+        }
+
         // Этап 0: Загрузка контента
         if (jobId && itemIndex != null) {
             const job = analysisJobs.get(jobId);
