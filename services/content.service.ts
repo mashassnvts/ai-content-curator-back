@@ -46,6 +46,12 @@ class ContentService {
             return await this.extractTelegramPostContent(url);
         }
         
+        // Проверяем, является ли это постом Twitter/X
+        const twitterMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[^/]+\/status\/(\d+)/);
+        if (twitterMatch) {
+            return await this.extractTwitterPostContent(url);
+        }
+        
         // Определяем тип URL
         const videoPlatform = this.detectVideoPlatform(url);
         
@@ -1705,6 +1711,142 @@ class ContentService {
                 console.warn(`yt-dlp metadata extraction failed: ${errorMsg}`);
             }
             return null;
+        }
+    }
+
+    /**
+     * Извлекает контент из поста Twitter/X
+     * Twitter посты — это текст, не видео. Извлекаем текст твита через og:description, [data-testid="tweetText"] или мета-теги.
+     */
+    private async extractTwitterPostContent(url: string): Promise<ExtractedContent> {
+        try {
+            console.log(`🐦 [Twitter/X] Extracting post content from: ${url}`);
+            
+            // Метод 1: ScrapingBee (og:description и twitter:description содержат текст твита)
+            try {
+                const scrapingBeeContent = await this.extractWithScrapingBee(url);
+                if (scrapingBeeContent) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(scrapingBeeContent);
+                    
+                    // Twitter/X помещает текст твита в og:description и twitter:description
+                    const ogDesc = $('meta[property="og:description"]').attr('content');
+                    const twitterDesc = $('meta[name="twitter:description"]').attr('content');
+                    const ogTitle = $('meta[property="og:title"]').attr('content');
+                    
+                    const tweetText = ogDesc || twitterDesc || '';
+                    
+                    if (tweetText.trim().length > 20) {
+                        let content = tweetText.trim();
+                        // Добавляем контекст автора из og:title (формат "Author on X: Tweet text")
+                        if (ogTitle && ogTitle.trim().length > 0 && !content.includes(ogTitle)) {
+                            content = `Автор: ${ogTitle}\n\nТекст поста:\n${content}`;
+                        }
+                        console.log(`✓ Extracted Twitter/X post via ScrapingBee (${tweetText.length} chars)`);
+                        return { content, sourceType: 'article' };
+                    }
+                }
+            } catch (scrapingBeeError: any) {
+                console.log(`⚠️ ScrapingBee failed for Twitter/X: ${scrapingBeeError.message}`);
+            }
+            
+            // Метод 2: Puppeteer (селектор [data-testid="tweetText"] для текста твита)
+            try {
+                const launchOptions = await this.getPuppeteerLaunchOptions();
+                const browser = await puppeteer.launch(launchOptions);
+                let tweetContent = '';
+                try {
+                    const page = await browser.newPage();
+                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    
+                    await new Promise(resolve => setTimeout(resolve, 4000));
+                    
+                    tweetContent = await page.evaluate(() => {
+                        // Twitter/X использует data-testid="tweetText" для текста твита
+                        const tweetEl = document.querySelector('[data-testid="tweetText"]');
+                        if (tweetEl) {
+                            return tweetEl.textContent?.trim() || '';
+                        }
+                        
+                        // Fallback: og:description из meta
+                        const ogDesc = document.querySelector('meta[property="og:description"]');
+                        if (ogDesc) {
+                            return ogDesc.getAttribute('content') || '';
+                        }
+                        
+                        const twitterDesc = document.querySelector('meta[name="twitter:description"]');
+                        if (twitterDesc) {
+                            return twitterDesc.getAttribute('content') || '';
+                        }
+                        
+                        // Fallback: article
+                        const article = document.querySelector('article');
+                        if (article) {
+                            article.querySelectorAll('script, style, nav, header, footer, aside, button, [role="button"]').forEach(el => el.remove());
+                            return article.textContent?.trim() || '';
+                        }
+                        
+                        return '';
+                    });
+                } finally {
+                    await browser.close().catch(() => {});
+                }
+                
+                if (tweetContent && tweetContent.trim().length > 20) {
+                    console.log(`✓ Extracted Twitter/X post via Puppeteer (${tweetContent.length} chars)`);
+                    return { content: tweetContent.trim(), sourceType: 'article' };
+                }
+            } catch (puppeteerError: any) {
+                console.warn(`⚠️ Puppeteer failed for Twitter/X: ${puppeteerError.message}`);
+            }
+            
+            // Метод 3: extractBasicMetadata (og:tags через HTTP)
+            try {
+                const basicMetadata = await this.extractBasicMetadata(url);
+                if (basicMetadata && basicMetadata.content && basicMetadata.content.trim().length > 20) {
+                    console.log(`✓ Extracted Twitter/X post via basic metadata (${basicMetadata.content.length} chars)`);
+                    return basicMetadata;
+                }
+            } catch (metadataError: any) {
+                console.warn(`⚠️ Basic metadata failed for Twitter/X: ${metadataError.message}`);
+            }
+            
+            // Метод 4: Простой fetch для og:tags (Twitter может отдавать их без JS)
+            try {
+                const response = await fetch(url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
+                    }
+                });
+                const html = await response.text();
+                const ogDescMatch = html.match(/<meta\s+property=["']og:description["']\s+content=["']([^"']+)["']/i);
+                const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i);
+                
+                const tweetText = ogDescMatch?.[1] || '';
+                const title = ogTitleMatch?.[1] || '';
+                
+                if (tweetText.trim().length > 20) {
+                    let content = tweetText.trim();
+                    if (title) {
+                        content = `Автор: ${title}\n\nТекст поста:\n${content}`;
+                    }
+                    console.log(`✓ Extracted Twitter/X post via fetch (${tweetText.length} chars)`);
+                    return { content, sourceType: 'article' };
+                }
+            } catch (fetchError: any) {
+                console.warn(`⚠️ Fetch failed for Twitter/X: ${fetchError.message}`);
+            }
+            
+            console.warn(`⚠️ All Twitter/X extraction methods failed. Returning minimal metadata.`);
+            return {
+                content: `⚠️ Не удалось извлечь полный текст поста Twitter/X. Возможно, пост требует авторизации или удалён.\n\nURL: ${url}`,
+                sourceType: 'metadata' as const
+            };
+        } catch (error: any) {
+            console.error(`❌ Failed to extract Twitter/X content: ${error.message}`);
+            throw new Error(`Не удалось извлечь контент из поста Twitter/X: ${error.message}`);
         }
     }
 
