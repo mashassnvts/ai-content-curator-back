@@ -453,8 +453,8 @@ class ContentService {
     private async getPuppeteerLaunchOptions(additionalArgs: string[] = []): Promise<any> {
             const launchOptions: any = {
                 headless: true,
-                // Railway/Docker: Chrome запускается медленно, CDP-команды (Network.enable и т.д.) могут таймаутить
-                protocolTimeout: 300000, // 5 минут — для контейнеров с ограниченными ресурсами
+                // Railway/Docker: Chrome и тяжёлые страницы (X.com) — CDP (Runtime.callFunctionOn и др.) может таймаутить
+                protocolTimeout: 600000, // 10 минут — для контейнеров и медленного evaluate() на X.com
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -1760,9 +1760,9 @@ class ContentService {
                 try {
                     const page = await browser.newPage();
                     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
                     
-                    await new Promise(resolve => setTimeout(resolve, 4000));
+                    await new Promise(resolve => setTimeout(resolve, 10000));
                     
                     tweetContent = await page.evaluate(() => {
                         // Twitter/X использует data-testid="tweetText" для текста твита
