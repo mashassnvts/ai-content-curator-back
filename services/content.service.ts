@@ -53,6 +53,12 @@ class ContentService {
             return await this.extractTwitterPostContent(url);
         }
         
+        // Ссылка на профиль Twitter/X (без /status/) — контент не извлекаем, чтобы не парсить как статью
+        const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
+        if (!urlNorm.includes('/status/') && urlNorm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/)) {
+            throw new Error('TWITTER_PROFILE_URL');
+        }
+        
         // Определяем тип URL
         const videoPlatform = this.detectVideoPlatform(url);
         
