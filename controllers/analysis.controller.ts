@@ -533,11 +533,21 @@ export const processSingleUrlAnalysis = async (
         }
 
         // Проверяем, является ли это ссылкой на профиль Twitter/X (fallback: если в цикле не распознали)
-        const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
-        const twitterProfileRegex = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i;
-        const twitterProfileMatch = !urlNorm.includes('/status/') && urlNorm.match(twitterProfileRegex);
-        if (twitterProfileMatch) {
-            const twitterUsername = twitterProfileMatch[1].replace('@', '').trim();
+        const twitterUsernameFromUrl = (u: string): string | null => {
+            try {
+                const parsed = new URL(u.trim().split('?')[0].split('#')[0] || u);
+                const host = parsed.hostname.toLowerCase();
+                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                const segs = pathname.split('/').filter(Boolean);
+                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
+                if (isTwitterHost && segs.length === 1 && /^[a-zA-Z0-9_]+$/.test(segs[0]) && segs[0].toLowerCase() !== 'i') {
+                    return segs[0].replace('@', '').trim();
+                }
+            } catch (_) {}
+            return null;
+        };
+        const twitterUsername = twitterUsernameFromUrl(url);
+        if (twitterUsername) {
             const POSTS_TO_ANALYZE = 6;
             let posts: Array<{ url: string; text?: string }> = [];
             try {
@@ -623,10 +633,8 @@ export const processSingleUrlAnalysis = async (
             sourceType = extracted.sourceType;
         } catch (extractError: any) {
             if (extractError?.message === 'TWITTER_PROFILE_URL') {
-                const norm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
-                const match = norm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i);
-                if (match) {
-                    const twitterUsername = match[1].replace('@', '').trim();
+                const twitterUsername = twitterUsernameFromUrl(url);
+                if (twitterUsername) {
                     const POSTS_TO_ANALYZE = 6;
                     let posts: Array<{ url: string; text?: string }> = [];
                     try {
@@ -1251,10 +1259,19 @@ const runAnalysisInBackground = async (
         const POSTS_TO_ANALYZE = 6;
 
         // Для обычных ссылок — сразу показываем прогресс (Telegram каналы и Twitter профили обрабатываются отдельно)
+        const isTwitterProfileUrl = (u: string): boolean => {
+            try {
+                const parsed = new URL(u.trim().split('?')[0].split('#')[0] || u);
+                const host = parsed.hostname.toLowerCase();
+                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                const segs = pathname.split('/').filter(Boolean);
+                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
+                return isTwitterHost && segs.length === 1 && /^[a-zA-Z0-9_]+$/.test(segs[0]) && segs[0].toLowerCase() !== 'i';
+            } catch (_) { return false; }
+        };
         const hasChannels = uniqueUrls.some(u => {
             const n = u.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || u.trim();
-            return /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(n) ||
-                (!n.includes('/status/') && /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i.test(n));
+            return /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(n) || isTwitterProfileUrl(u);
         });
         if (!hasChannels && uniqueUrls.length > 0) {
             analysisJobs.set(jobId, {
@@ -1265,13 +1282,25 @@ const runAnalysisInBackground = async (
             });
         }
 
-        const TWITTER_PROFILE_REGEX = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i;
+        const getTwitterUsernameFromUrl = (u: string): string | null => {
+            try {
+                const parsed = new URL(u.trim().split('?')[0].split('#')[0] || u);
+                const host = parsed.hostname.toLowerCase();
+                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                const segs = pathname.split('/').filter(Boolean);
+                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
+                if (isTwitterHost && segs.length === 1 && /^[a-zA-Z0-9_]+$/.test(segs[0]) && segs[0].toLowerCase() !== 'i') {
+                    return segs[0].replace('@', '').trim();
+                }
+            } catch (_) {}
+            return null;
+        };
 
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
             const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
             const telegramChannelMatch = urlNorm.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
-            const twitterProfileMatch = !urlNorm.includes('/status/') && urlNorm.match(TWITTER_PROFILE_REGEX);
+            const twitterUsernameFromLoop = getTwitterUsernameFromUrl(url);
 
             if (telegramChannelMatch) {
                 // Ссылка на канал (без ID поста) — анализируем последние 6 постов
@@ -1510,9 +1539,9 @@ const runAnalysisInBackground = async (
                         console.warn(`⚠️ Failed to save channel analysis to history: ${error.message}`);
                     }
                 }
-            } else if (twitterProfileMatch) {
+            } else if (twitterUsernameFromLoop) {
                 // Ссылка на профиль Twitter/X — анализируем последние 5–6 твитов (как с Telegram-каналом)
-                const twitterUsername = twitterProfileMatch[1].replace('@', '').trim();
+                const twitterUsername = twitterUsernameFromLoop;
                 if (!twitterUsername) {
                     const job = analysisJobs.get(jobId);
                     if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length, currentStage: 0 });
