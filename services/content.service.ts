@@ -453,6 +453,8 @@ class ContentService {
     private async getPuppeteerLaunchOptions(additionalArgs: string[] = []): Promise<any> {
             const launchOptions: any = {
                 headless: true,
+                // Railway/Docker: Chrome запускается медленно, CDP-команды (Network.enable и т.д.) могут таймаутить
+                protocolTimeout: 300000, // 5 минут — для контейнеров с ограниченными ресурсами
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -1189,13 +1191,12 @@ class ContentService {
             console.log('Launching browser to extract YouTube transcript...');
             
             const launchOptions = await this.getPuppeteerLaunchOptions();
-            launchOptions.protocolTimeout = 120000; // 2 минуты для protocol timeout
             
-            // Добавляем таймаут на запуск браузера (30 секунд)
+            // Добавляем таймаут на запуск браузера (90 сек для Railway/Docker — Chrome может грузиться долго)
             browser = await Promise.race([
                 puppeteer.launch(launchOptions),
                 new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Browser launch timeout')), 30000)
+                    setTimeout(() => reject(new Error('Browser launch timeout')), 90000)
                 )
             ]) as any;
     
@@ -2093,10 +2094,10 @@ class ContentService {
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
 
-            // Для YouTube используем короткий таймаут и domcontentloaded для быстрого извлечения метаданных
+            // Для YouTube используем domcontentloaded; в Railway/Docker страницы грузятся медленно
             // Для VK увеличиваем время ожидания и используем networkidle для полной загрузки
             const waitUntil = platform === 'vk' ? 'networkidle2' : 'domcontentloaded';
-            const timeout = platform === 'vk' ? 90000 : (platform === 'youtube' ? 20000 : 60000); // Для YouTube 20 секунд
+            const timeout = platform === 'vk' ? 90000 : (platform === 'youtube' ? 60000 : 60000); // YouTube: 60 сек для Railway
             
             await page.goto(url, { 
                 waitUntil,
@@ -2552,10 +2553,10 @@ class ContentService {
                 'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8'
             });
 
-            // Используем увеличенный таймаут для надежного извлечения метаданных
+            // Используем увеличенный таймаут для Railway/Docker (страницы грузятся медленно)
             await page.goto(url, { 
                 waitUntil: 'domcontentloaded',
-                timeout: 30000 // Увеличено до 30 секунд для надежности
+                timeout: 60000 // 60 секунд для контейнеров
             });
             
             // Ждем загрузки метаданных
