@@ -55,7 +55,7 @@ class ContentService {
         
         // Ссылка на профиль Twitter/X (без /status/) — контент не извлекаем, чтобы не парсить как статью
         const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
-        if (!urlNorm.includes('/status/') && urlNorm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/)) {
+        if (!urlNorm.includes('/status/') && urlNorm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i)) {
             throw new Error('TWITTER_PROFILE_URL');
         }
         

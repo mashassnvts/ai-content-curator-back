@@ -144,8 +144,8 @@ const isValidUrl = (str: string): boolean => {
     if (telegramPostPattern.test(trimmed) || telegramChannelPattern.test(trimmed)) {
         return true;
     }
-    // Проверяем Twitter/X профиль (https://x.com/username или https://twitter.com/username)
-    const twitterProfilePattern = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+    // Проверяем Twitter/X профиль (https://x.com/username или https://twitter.com/username; регистр хоста не важен)
+    const twitterProfilePattern = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i;
     if (twitterProfilePattern.test(trimmed)) {
         return true;
     }
@@ -534,7 +534,7 @@ export const processSingleUrlAnalysis = async (
 
         // Проверяем, является ли это ссылкой на профиль Twitter/X (fallback: если в цикле не распознали)
         const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
-        const twitterProfileRegex = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+        const twitterProfileRegex = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i;
         const twitterProfileMatch = !urlNorm.includes('/status/') && urlNorm.match(twitterProfileRegex);
         if (twitterProfileMatch) {
             const twitterUsername = twitterProfileMatch[1].replace('@', '').trim();
@@ -624,7 +624,7 @@ export const processSingleUrlAnalysis = async (
         } catch (extractError: any) {
             if (extractError?.message === 'TWITTER_PROFILE_URL') {
                 const norm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
-                const match = norm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/);
+                const match = norm.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i);
                 if (match) {
                     const twitterUsername = match[1].replace('@', '').trim();
                     const POSTS_TO_ANALYZE = 6;
@@ -1254,7 +1254,7 @@ const runAnalysisInBackground = async (
         const hasChannels = uniqueUrls.some(u => {
             const n = u.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || u.trim();
             return /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(n) ||
-                (!n.includes('/status/') && /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/.test(n));
+                (!n.includes('/status/') && /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i.test(n));
         });
         if (!hasChannels && uniqueUrls.length > 0) {
             analysisJobs.set(jobId, {
@@ -1265,7 +1265,7 @@ const runAnalysisInBackground = async (
             });
         }
 
-        const TWITTER_PROFILE_REGEX = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+        const TWITTER_PROFILE_REGEX = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/i;
 
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
