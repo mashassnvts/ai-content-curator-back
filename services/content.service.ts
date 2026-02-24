@@ -352,6 +352,19 @@ class ContentService {
                 sourceType: 'metadata' as const
             };
         } else {
+            // Повторная проверка: ссылка на профиль X/Twitter не должна парситься как статья
+            try {
+                const parsed = new URL(url.trim().split('?')[0].split('#')[0] || url);
+                const host = parsed.hostname.toLowerCase();
+                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
+                const isProfilePath = /^[a-zA-Z0-9_]+$/.test(pathname) && !pathname.toLowerCase().startsWith('i');
+                if (isTwitterHost && isProfilePath) {
+                    throw new Error('TWITTER_PROFILE_URL');
+                }
+            } catch (e: any) {
+                if (e?.message === 'TWITTER_PROFILE_URL') throw e;
+            }
             // ... (Статья - сначала пробуем ScrapingBee, потом Puppeteer)
             // Сначала пробуем ScrapingBee (не требует браузеров)
             try {
@@ -393,10 +406,17 @@ class ContentService {
                 console.log(`   Trying Puppeteer fallback...`);
             }
             
-            // Fallback на Puppeteer
+            // Fallback на Puppeteer (ещё раз не парсить профиль X)
             try {
+                const parsed2 = new URL(url.trim().split('?')[0].split('#')[0] || url);
+                const host2 = parsed2.hostname.toLowerCase();
+                const path2 = parsed2.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                if ((host2 === 'twitter.com' || host2 === 'x.com') && /^[a-zA-Z0-9_]+$/.test(path2) && !path2.toLowerCase().startsWith('i')) {
+                    throw new Error('TWITTER_PROFILE_URL');
+                }
                 return await this.scrapeArticleWithPuppeteer(url);
             } catch (puppeteerError: any) {
+                if (puppeteerError?.message === 'TWITTER_PROFILE_URL') throw puppeteerError;
                 const errorMsg = puppeteerError.message || 'Unknown error';
                 console.warn(`⚠️ Puppeteer scraping failed: ${errorMsg}`);
                 
@@ -2040,6 +2060,16 @@ class ContentService {
     }
 
     private async scrapeArticleWithPuppeteer(url: string): Promise<ExtractedContent> {
+        try {
+            const parsed = new URL(url.trim().split('?')[0].split('#')[0] || url);
+            const host = parsed.hostname.toLowerCase();
+            const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+            if ((host === 'twitter.com' || host === 'x.com') && /^[a-zA-Z0-9_]+$/.test(pathname) && !pathname.toLowerCase().startsWith('i')) {
+                throw new Error('TWITTER_PROFILE_URL');
+            }
+        } catch (e: any) {
+            if (e?.message === 'TWITTER_PROFILE_URL') throw e;
+        }
         console.log(`Attempting to scrape article with Puppeteer from: ${url}`);
         let browser = null;
         try {
