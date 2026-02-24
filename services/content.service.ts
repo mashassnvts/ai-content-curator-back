@@ -46,9 +46,10 @@ class ContentService {
             return await this.extractTelegramPostContent(url);
         }
         
-        // Проверяем, является ли это постом Twitter/X
-        const twitterMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[^/]+\/status\/(\d+)/);
-        if (twitterMatch) {
+        // Проверяем, является ли это постом или страницей Twitter/X (в т.ч. x.com/i/trending/...)
+        const twitterStatusMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[^/]+\/status\/(\d+)/);
+        const twitterTrendingMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/i\/trending\/\d+/);
+        if (twitterStatusMatch || twitterTrendingMatch) {
             return await this.extractTwitterPostContent(url);
         }
         
