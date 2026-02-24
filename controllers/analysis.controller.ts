@@ -144,6 +144,11 @@ const isValidUrl = (str: string): boolean => {
     if (telegramPostPattern.test(trimmed) || telegramChannelPattern.test(trimmed)) {
         return true;
     }
+    // Проверяем Twitter/X профиль (https://x.com/username или https://twitter.com/username)
+    const twitterProfilePattern = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+    if (twitterProfilePattern.test(trimmed)) {
+        return true;
+    }
     
     // Если содержит пробелы в середине - это не URL
     if (trimmed.includes(' ') && !trimmed.startsWith('http')) {
@@ -1135,8 +1140,11 @@ const runAnalysisInBackground = async (
         const urlResults: any[] = [];
         const POSTS_TO_ANALYZE = 6;
 
-        // Для обычных ссылок — сразу показываем прогресс
-        const hasChannels = uniqueUrls.some(u => /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(u));
+        // Для обычных ссылок — сразу показываем прогресс (Telegram каналы и Twitter профили обрабатываются отдельно)
+        const hasChannels = uniqueUrls.some(u => 
+            /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(u) || 
+            /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/.test(u)
+        );
         if (!hasChannels && uniqueUrls.length > 0) {
             analysisJobs.set(jobId, {
                 status: 'in_progress',
@@ -1385,6 +1393,239 @@ const runAnalysisInBackground = async (
                         console.log(`💾 Saved channel analysis to history: @${channelUsername} (${finalChannelResult.channelAnalysis.totalPosts} posts)`);
                     } catch (error: any) {
                         console.warn(`⚠️ Failed to save channel analysis to history: ${error.message}`);
+                    }
+                }
+            } else if (url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/)) {
+                // Ссылка на профиль Twitter/X — анализируем последние 5–6 твитов (как с Telegram-каналом)
+                const twitterProfileMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/);
+                const twitterUsername = twitterProfileMatch![1].replace('@', '').trim();
+                if (!twitterUsername) {
+                    const job = analysisJobs.get(jobId);
+                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length, currentStage: 0 });
+                    urlResults.push({ originalUrl: url, error: true, message: 'Некорректная ссылка на профиль Twitter/X' } as any);
+                    continue;
+                }
+
+                analysisJobs.set(jobId, {
+                    status: 'in_progress',
+                    results: [...textResults, ...urlResults],
+                    totalExpected: POSTS_TO_ANALYZE,
+                    itemType: 'channel',
+                    channelProgress: 0,
+                    currentStage: 0,
+                    channelUsername: twitterUsername,
+                    isTwitterProfile: true
+                });
+
+                let allFetched: Array<{ url: string; text?: string }> = [];
+                try {
+                    allFetched = await contentService.getTwitterProfilePosts(twitterUsername, POSTS_TO_ANALYZE);
+                } catch (fetchError: any) {
+                    console.error(`❌ [analysis] Failed to fetch tweets from @${twitterUsername}:`, fetchError.message);
+                    urlResults.push({
+                        originalUrl: url,
+                        isChannel: true,
+                        isTwitterProfile: true,
+                        channelUsername: twitterUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}. Возможно, профиль приватный или недоступен.`
+                        }
+                    });
+                    continue;
+                }
+
+                const posts = allFetched.slice(0, POSTS_TO_ANALYZE);
+
+                if (posts.length === 0) {
+                    urlResults.push({
+                        originalUrl: url,
+                        isChannel: true,
+                        isTwitterProfile: true,
+                        channelUsername: twitterUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}. Возможно, профиль приватный или недоступен.`
+                        }
+                    });
+                    continue;
+                }
+
+                analysisJobs.set(jobId, {
+                    status: 'in_progress',
+                    results: [...textResults, ...urlResults],
+                    totalExpected: posts.length,
+                    itemType: 'channel',
+                    currentItemIndex: 0,
+                    currentStage: 0,
+                    channelUsername: twitterUsername,
+                    isTwitterProfile: true
+                });
+
+                const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
+                let relevantCount = 0;
+
+                const userTags = userId ? await getUserTagsCached(userId) : [];
+                const contextForAnalysis = userTags.length > 0
+                    ? userTags.map((t: { tag: string }) => t.tag).join(', ')
+                    : userId
+                        ? (await UserInterest.findAll({ where: { userId, isActive: true } })).map((ui: { interest: string }) => ui.interest).join(', ')
+                        : interests;
+
+                if (!contextForAnalysis) {
+                    urlResults.push({
+                        originalUrl: url,
+                        isChannel: true,
+                        isTwitterProfile: true,
+                        channelUsername: twitterUsername,
+                        channelAnalysis: {
+                            totalPosts: 0,
+                            relevantPosts: 0,
+                            posts: [],
+                            recommendation: 'Добавьте темы в облако смыслов: проанализируйте статьи в режиме "Я прочитал и понравилось".'
+                        }
+                    });
+                    continue;
+                }
+
+                for (let j = 0; j < posts.length; j++) {
+                    const post = posts[j];
+                    const job = analysisJobs.get(jobId);
+                    if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: j, currentStage: 0 });
+                    try {
+                        const analysisResult = await processSingleUrlAnalysis(
+                            post.url,
+                            contextForAnalysis,
+                            feedbackHistory,
+                            userId,
+                            analysisMode,
+                            jobId,
+                            j,
+                            true
+                        );
+                        if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
+                            const res = analysisResult as any;
+                            if (res && typeof res.score === 'number' && typeof res.verdict === 'string') {
+                                analyzedPosts.push({
+                                    url: post.url,
+                                    score: res.score,
+                                    verdict: res.verdict,
+                                    summary: typeof res.summary === 'string' ? res.summary : undefined,
+                                    reasoning: typeof res.reasoning === 'string' ? res.reasoning : undefined,
+                                    text: post.text || undefined
+                                });
+                                if (res.score >= 70) relevantCount++;
+
+                                const channelResult = {
+                                    originalUrl: url,
+                                    isChannel: true,
+                                    isTwitterProfile: true,
+                                    channelUsername: twitterUsername,
+                                    channelAnalysis: {
+                                        totalPosts: posts.length,
+                                        relevantPosts: relevantCount,
+                                        posts: analyzedPosts,
+                                        recommendation: undefined
+                                    },
+                                    channelUrl: `https://x.com/${twitterUsername}`,
+                                    isComplete: false
+                                };
+
+                                const existingIndex = urlResults.findIndex((r: any) => r.isTwitterProfile && r.channelUsername === twitterUsername);
+                                if (existingIndex >= 0) {
+                                    urlResults[existingIndex] = channelResult;
+                                } else {
+                                    urlResults.push(channelResult);
+                                }
+
+                                analysisJobs.set(jobId, {
+                                    status: 'in_progress',
+                                    results: [...textResults, ...urlResults],
+                                    totalExpected: posts.length,
+                                    itemType: 'channel',
+                                    channelProgress: analyzedPosts.length
+                                });
+                            }
+                        }
+                    } catch (analysisError: any) {
+                        console.error(`⚠️ [analysis] Failed to analyze tweet ${post.url}:`, analysisError.message);
+                    }
+                }
+
+                const job = analysisJobs.get(jobId);
+                if (job) analysisJobs.set(jobId, { ...job, currentStage: 7 });
+
+                const finalRecommendation = analyzedPosts.length === 0
+                    ? (posts.length === 0 ? 'Не удалось получить твиты из профиля. Возможно, профиль приватный или недоступен.' : 'Не удалось проанализировать твиты. Добавьте темы в облако смыслов.')
+                    : relevantCount === 0
+                        ? `Проанализировано ${analyzedPosts.length} твитов. Ни один не совпадает с вашими интересами (порог 70%). Профиль можно пропустить.`
+                        : `Проанализировано ${analyzedPosts.length} твитов. Найдено ${relevantCount} релевантных (${Math.round(relevantCount / analyzedPosts.length * 100)}%). Профиль стоит читать!`;
+
+                const existingIndex = urlResults.findIndex((r: any) => r.isTwitterProfile && r.channelUsername === twitterUsername);
+                const finalResult = {
+                    originalUrl: url,
+                    isChannel: true,
+                    isTwitterProfile: true,
+                    channelUsername: twitterUsername,
+                    channelAnalysis: {
+                        totalPosts: analyzedPosts.length,
+                        relevantPosts: relevantCount,
+                        posts: analyzedPosts,
+                        recommendation: finalRecommendation
+                    },
+                    channelUrl: `https://x.com/${twitterUsername}`,
+                    isComplete: true
+                };
+
+                if (existingIndex >= 0) {
+                    urlResults[existingIndex] = finalResult;
+                } else {
+                    urlResults.push(finalResult);
+                }
+
+                if (userId && finalResult.channelAnalysis) {
+                    try {
+                        const channelSummary = `🐦 Анализ профиля Twitter/X @${twitterUsername}\n\n` +
+                            `Проанализировано твитов: ${finalResult.channelAnalysis.totalPosts}\n` +
+                            `Релевантных: ${finalResult.channelAnalysis.relevantPosts}\n` +
+                            `Процент релевантности: ${finalResult.channelAnalysis.totalPosts > 0 ? Math.round((finalResult.channelAnalysis.relevantPosts / finalResult.channelAnalysis.totalPosts) * 100) : 0}%\n\n` +
+                            `Рекомендация: ${finalResult.channelAnalysis.recommendation}`;
+
+                        const channelReasoning = `Детальный анализ профиля @${twitterUsername}:\n\n` +
+                            finalResult.channelAnalysis.posts.map((post, idx) =>
+                                `Твит ${idx + 1}:\n` +
+                                `URL: ${post.url}\n` +
+                                `Оценка: ${post.score}/100\n` +
+                                `Вердикт: ${post.verdict}\n` +
+                                (post.summary ? `Саммари: ${post.summary}\n` : '') +
+                                (post.reasoning ? `Объяснение: ${post.reasoning}\n` : '') +
+                                `\n---\n`
+                            ).join('\n');
+
+                        const avgScore = finalResult.channelAnalysis.posts.length > 0
+                            ? Math.round(finalResult.channelAnalysis.posts.reduce((sum, p) => sum + p.score, 0) / finalResult.channelAnalysis.posts.length)
+                            : 0;
+
+                        const channelVerdict = avgScore >= 70 ? 'Полезно' : avgScore >= 40 ? 'Нейтрально' : 'Не трать время';
+
+                        await AnalysisHistory.create({
+                            userId,
+                            telegramId: null,
+                            url: url,
+                            sourceType: 'twitter_profile',
+                            score: avgScore,
+                            verdict: channelVerdict,
+                            summary: channelSummary,
+                            reasoning: channelReasoning,
+                            interests,
+                        });
+                        console.log(`💾 Saved Twitter profile analysis to history: @${twitterUsername} (${finalResult.channelAnalysis.totalPosts} tweets)`);
+                    } catch (error: any) {
+                        console.warn(`⚠️ Failed to save Twitter profile analysis to history: ${error.message}`);
                     }
                 }
             } else {
