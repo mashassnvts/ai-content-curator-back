@@ -3012,6 +3012,73 @@ class ContentService {
             throw new Error(`Transcription failed: ${error.message}`);
         }
     }
+
+    /**
+     * Получает последние N твитов из профиля Twitter/X (аналог getChannelPosts для Telegram).
+     * Возвращает массив URL твитов для последующего анализа.
+     */
+    async getTwitterProfilePosts(username: string, limit: number = 6): Promise<Array<{ url: string; text?: string }>> {
+        const cleanUsername = username.replace('@', '').trim();
+        if (!cleanUsername) return [];
+
+        const reservedPaths = new Set(['i', 'home', 'explore', 'search', 'intent', 'share', 'compose', 'settings', 'account', 'messages', 'notifications', 'login', 'signup']);
+        if (reservedPaths.has(cleanUsername.toLowerCase())) return [];
+
+        const profileUrl = `https://x.com/${cleanUsername}`;
+        const results: Array<{ url: string; text?: string }> = [];
+        const seenIds = new Set<string>();
+
+        try {
+            console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername}...`);
+            const launchOptions = await this.getPuppeteerLaunchOptions();
+            const browser = await puppeteer.launch(launchOptions);
+            try {
+                const page = await browser.newPage();
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                await new Promise(resolve => setTimeout(resolve, 8000));
+
+                // Прокручиваем вниз, чтобы подгрузить больше твитов
+                await page.evaluate(() => window.scrollBy(0, 800));
+                await new Promise(resolve => setTimeout(resolve, 3000));
+
+                const tweetData = await page.evaluate((uname: string) => {
+                    const items: Array<{ id: string; text: string }> = [];
+                    const links = Array.from(document.querySelectorAll(`a[href*="/${uname}/status/"]`));
+                    const seen = new Set<string>();
+                    for (const a of links) {
+                        const href = a.getAttribute('href') || '';
+                        const match = href.match(/\/status\/(\d+)/);
+                        if (match && !seen.has(match[1])) {
+                            seen.add(match[1]);
+                            const tweetEl = a.closest('article');
+                            const textEl = tweetEl?.querySelector('[data-testid="tweetText"]');
+                            const text = textEl?.textContent?.trim() || '';
+                            items.push({ id: match[1], text });
+                        }
+                    }
+                    return items;
+                }, cleanUsername);
+
+                for (const item of tweetData) {
+                    if (results.length >= limit) break;
+                    if (seenIds.has(item.id)) continue;
+                    seenIds.add(item.id);
+                    results.push({
+                        url: `https://x.com/${cleanUsername}/status/${item.id}`,
+                        text: item.text || undefined
+                    });
+                }
+
+                console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername}`);
+            } finally {
+                await browser.close().catch(() => {});
+            }
+        } catch (error: any) {
+            console.warn(`⚠️ [Twitter/X] Failed to fetch profile @${cleanUsername}: ${error.message}`);
+        }
+        return results;
+    }
 }
 
 export default new ContentService();
