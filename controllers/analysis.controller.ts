@@ -1141,10 +1141,11 @@ const runAnalysisInBackground = async (
         const POSTS_TO_ANALYZE = 6;
 
         // Для обычных ссылок — сразу показываем прогресс (Telegram каналы и Twitter профили обрабатываются отдельно)
-        const hasChannels = uniqueUrls.some(u => 
-            /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(u) || 
-            /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/.test(u)
-        );
+        const hasChannels = uniqueUrls.some(u => {
+            const n = u.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || u.trim();
+            return /^https?:\/\/t\.me\/([^\/]+)\/?$/.test(n) ||
+                (!n.includes('/status/') && /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/.test(n));
+        });
         if (!hasChannels && uniqueUrls.length > 0) {
             analysisJobs.set(jobId, {
                 status: 'in_progress',
@@ -1154,9 +1155,13 @@ const runAnalysisInBackground = async (
             });
         }
 
+        const TWITTER_PROFILE_REGEX = /^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/;
+
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
-            const telegramChannelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
+            const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
+            const telegramChannelMatch = urlNorm.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
+            const twitterProfileMatch = !urlNorm.includes('/status/') && urlNorm.match(TWITTER_PROFILE_REGEX);
 
             if (telegramChannelMatch) {
                 // Ссылка на канал (без ID поста) — анализируем последние 6 постов
@@ -1395,10 +1400,9 @@ const runAnalysisInBackground = async (
                         console.warn(`⚠️ Failed to save channel analysis to history: ${error.message}`);
                     }
                 }
-            } else if (url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/)) {
+            } else if (twitterProfileMatch) {
                 // Ссылка на профиль Twitter/X — анализируем последние 5–6 твитов (как с Telegram-каналом)
-                const twitterProfileMatch = url.match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)\/?$/);
-                const twitterUsername = twitterProfileMatch![1].replace('@', '').trim();
+                const twitterUsername = twitterProfileMatch[1].replace('@', '').trim();
                 if (!twitterUsername) {
                     const job = analysisJobs.get(jobId);
                     if (job) analysisJobs.set(jobId, { ...job, currentItemIndex: i, itemType: 'urls', totalExpected: uniqueUrls.length, currentStage: 0 });
