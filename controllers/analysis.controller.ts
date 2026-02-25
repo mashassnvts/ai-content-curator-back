@@ -1301,6 +1301,9 @@ const runAnalysisInBackground = async (
             const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
             const telegramChannelMatch = urlNorm.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
             const twitterUsernameFromLoop = getTwitterUsernameFromUrl(url);
+            if (twitterUsernameFromLoop) {
+                console.log(`[analysis] Twitter profile detected in loop: @${twitterUsernameFromLoop}`);
+            }
 
             if (telegramChannelMatch) {
                 // Ссылка на канал (без ID поста) — анализируем последние 6 постов

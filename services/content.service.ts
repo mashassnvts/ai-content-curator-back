@@ -57,13 +57,17 @@ class ContentService {
         
         // Ссылка на профиль Twitter/X (без /status/) — контент не извлекаем, чтобы не парсить как статью
         try {
-            const parsed = new URL(url.trim().split('?')[0].split('#')[0] || url);
-            const host = parsed.hostname.toLowerCase();
-            const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
-            const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
-            const isProfilePath = /^[a-zA-Z0-9_]+$/.test(pathname) && !pathname.toLowerCase().startsWith('i');
-            if (isTwitterHost && isProfilePath) {
-                throw new Error('TWITTER_PROFILE_URL');
+            const toParse = (url || '').trim().split('?')[0].split('#')[0].trim() || url.trim();
+            if (!toParse || !toParse.startsWith('http')) { /* skip */ } else {
+                const parsed = new URL(toParse);
+                const host = parsed.hostname.toLowerCase();
+                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
+                const isProfilePath = /^[a-zA-Z0-9_]+$/.test(pathname) && pathname.toLowerCase() !== 'i';
+                if (isTwitterHost && isProfilePath) {
+                    console.log(`🐦 [Twitter/X] Profile URL detected in extractContentFromUrl, throwing TWITTER_PROFILE_URL: ${pathname}`);
+                    throw new Error('TWITTER_PROFILE_URL');
+                }
             }
         } catch (e: any) {
             if (e?.message === 'TWITTER_PROFILE_URL') throw e;
