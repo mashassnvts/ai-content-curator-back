@@ -3142,8 +3142,10 @@ class ContentService {
         }
 
         // Метод 3: Puppeteer — полная загрузка ленты (с таймаутом, чтобы не зависать)
-        const PUPPETEER_PROFILE_TIMEOUT_MS = 70000; // 70 сек макс — избегаем зависания и OOM на Railway
+        const PUPPETEER_PROFILE_TIMEOUT_MS = 95000; // 95 сек — при нескольких профилях подряд первый Chrome может ещё закрываться
         try {
+            // Пауза перед запуском — даёт предыдущему браузеру время закрыться при обработке нескольких профилей подряд
+            await new Promise(resolve => setTimeout(resolve, 5000));
             console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer (timeout ${PUPPETEER_PROFILE_TIMEOUT_MS / 1000}s)...`);
             const puppeteerTask = (async () => {
                 const launchOptions = await this.getPuppeteerLaunchOptions();
