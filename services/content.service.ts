@@ -1784,49 +1784,47 @@ class ContentService {
                 console.log(`⚠️ ScrapingBee failed for Twitter/X: ${scrapingBeeError.message}`);
             }
             
-            // Метод 2: Puppeteer (селектор [data-testid="tweetText"] для текста твита)
+            // Метод 2: Puppeteer (селектор [data-testid="tweetText"] для текста твита) — с таймаутом, чтобы не зависать на деплое
+            const TWEET_PUPPETEER_TIMEOUT_MS = 45000; // 45 сек макс для одного твита
             try {
-                const launchOptions = await this.getPuppeteerLaunchOptions();
-                const browser = await puppeteer.launch(launchOptions);
-                let tweetContent = '';
-                try {
-                    const page = await browser.newPage();
-                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                    
-                    await new Promise(resolve => setTimeout(resolve, 10000));
-                    
-                    tweetContent = await page.evaluate(() => {
-                        // Twitter/X использует data-testid="tweetText" для текста твита
-                        const tweetEl = document.querySelector('[data-testid="tweetText"]');
-                        if (tweetEl) {
-                            return tweetEl.textContent?.trim() || '';
-                        }
-                        
-                        // Fallback: og:description из meta
-                        const ogDesc = document.querySelector('meta[property="og:description"]');
-                        if (ogDesc) {
-                            return ogDesc.getAttribute('content') || '';
-                        }
-                        
-                        const twitterDesc = document.querySelector('meta[name="twitter:description"]');
-                        if (twitterDesc) {
-                            return twitterDesc.getAttribute('content') || '';
-                        }
-                        
-                        // Fallback: article
-                        const article = document.querySelector('article');
-                        if (article) {
-                            article.querySelectorAll('script, style, nav, header, footer, aside, button, [role="button"]').forEach(el => el.remove());
-                            return article.textContent?.trim() || '';
-                        }
-                        
-                        return '';
-                    });
-                } finally {
-                    await browser.close().catch(() => {});
-                }
-                
+                const puppeteerTweetTask = (async () => {
+                    const launchOptions = await this.getPuppeteerLaunchOptions();
+                    const browser = await puppeteer.launch(launchOptions);
+                    let tweetContent = '';
+                    try {
+                        const page = await browser.newPage();
+                        await page.setDefaultTimeout(15000);
+                        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+                        await new Promise(resolve => setTimeout(resolve, 6000));
+
+                        tweetContent = await page.evaluate(() => {
+                            const tweetEl = document.querySelector('[data-testid="tweetText"]');
+                            if (tweetEl) return tweetEl.textContent?.trim() || '';
+                            const ogDesc = document.querySelector('meta[property="og:description"]');
+                            if (ogDesc) return ogDesc.getAttribute('content') || '';
+                            const twitterDesc = document.querySelector('meta[name="twitter:description"]');
+                            if (twitterDesc) return twitterDesc.getAttribute('content') || '';
+                            const article = document.querySelector('article');
+                            if (article) {
+                                article.querySelectorAll('script, style, nav, header, footer, aside, button, [role="button"]').forEach(el => el.remove());
+                                return article.textContent?.trim() || '';
+                            }
+                            return '';
+                        });
+                    } finally {
+                        await browser.close().catch(() => {});
+                    }
+                    return tweetContent;
+                })();
+
+                const tweetContent = await Promise.race([
+                    puppeteerTweetTask,
+                    new Promise<string>((_, reject) =>
+                        setTimeout(() => reject(new Error('Twitter post extraction timeout')), TWEET_PUPPETEER_TIMEOUT_MS)
+                    )
+                ]);
+
                 if (tweetContent && tweetContent.trim().length > 20) {
                     console.log(`✓ Extracted Twitter/X post via Puppeteer (${tweetContent.length} chars)`);
                     return { content: tweetContent.trim(), sourceType: 'article' };
