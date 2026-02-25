@@ -3059,7 +3059,7 @@ class ContentService {
 
     /**
      * Получает последние N твитов из профиля Twitter/X (аналог getChannelPosts для Telegram).
-     * Возвращает массив URL твитов для последующего анализа.
+     * Сначала пробует ScrapingBee (HTML профиля), затем Nitter (если есть), затем Puppeteer.
      */
     async getTwitterProfilePosts(username: string, limit: number = 6): Promise<Array<{ url: string; text?: string }>> {
         const cleanUsername = username.replace('@', '').trim();
@@ -3072,23 +3072,93 @@ class ContentService {
         const results: Array<{ url: string; text?: string }> = [];
         const seenIds = new Set<string>();
 
+        const addFromIds = (ids: string[]) => {
+            for (const id of ids) {
+                if (results.length >= limit || seenIds.has(id)) continue;
+                seenIds.add(id);
+                results.push({ url: `https://x.com/${cleanUsername}/status/${id}`, text: undefined });
+            }
+        };
+
+        // Метод 1: ScrapingBee (только если задан ключ — бесплатного тира нет)
+        if (process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS) {
+            try {
+                const html = await this.extractWithScrapingBee(profileUrl);
+                if (html) {
+                    const cheerio = await import('cheerio');
+                    const $ = cheerio.load(html);
+                    const ids: string[] = [];
+                    $('a[href*="/status/"]').each((_, el) => {
+                        const href = $(el).attr('href') || '';
+                        const match = href.match(/\/status\/(\d+)/);
+                        if (match) ids.push(match[1]);
+                    });
+                    const uniqueIds = Array.from(new Set(ids));
+                    addFromIds(uniqueIds);
+                    if (results.length >= limit) {
+                        console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} via ScrapingBee`);
+                        return results.slice(0, limit);
+                    }
+                    if (results.length > 0) {
+                        console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} via ScrapingBee (partial)`);
+                        return results;
+                    }
+                }
+            } catch (e: any) {
+                console.log(`⚠️ [Twitter/X] ScrapingBee for profile failed: ${e?.message || e}`);
+            }
+        }
+
+        // Метод 2: Nitter — простой HTML без тяжёлого JS (публичные инстансы могут быть нестабильны)
         try {
-            console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername}...`);
+            const nitterUrl = `https://nitter.net/${cleanUsername}`;
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 15000);
+            const res = await fetch(nitterUrl, {
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (res.ok) {
+                const html = await res.text();
+                const cheerio = await import('cheerio');
+                const $ = cheerio.load(html);
+                const ids: string[] = [];
+                $('a[href*="/status/"]').each((_, el) => {
+                    const href = $(el).attr('href') || '';
+                    const match = href.match(/\/status\/(\d+)/);
+                    if (match) ids.push(match[1]);
+                });
+                const uniqueIds = Array.from(new Set(ids));
+                addFromIds(uniqueIds);
+                if (results.length > 0) {
+                    console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} via Nitter`);
+                    return results.slice(0, limit);
+                }
+            }
+        } catch (e: any) {
+            console.log(`⚠️ [Twitter/X] Nitter fallback failed: ${e?.message || e}`);
+        }
+
+        // Метод 3: Puppeteer — полная загрузка ленты (увеличены ожидание и прокрутки)
+        try {
+            console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer...`);
             const launchOptions = await this.getPuppeteerLaunchOptions();
             const browser = await puppeteer.launch(launchOptions);
             try {
                 const page = await browser.newPage();
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                 await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                await new Promise(resolve => setTimeout(resolve, 8000));
+                await new Promise(resolve => setTimeout(resolve, 12000));
 
-                // Прокручиваем вниз, чтобы подгрузить больше твитов
-                await page.evaluate(() => window.scrollBy(0, 800));
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                for (let s = 0; s < 3; s++) {
+                    await page.evaluate(() => window.scrollBy(0, 600));
+                    await new Promise(resolve => setTimeout(resolve, 2500));
+                }
 
                 const tweetData = await page.evaluate((uname: string) => {
                     const items: Array<{ id: string; text: string }> = [];
-                    const links = Array.from(document.querySelectorAll(`a[href*="/${uname}/status/"]`));
+                    const links = Array.from(document.querySelectorAll(`a[href*="/${uname}/status/"], a[href*="/status/"]`));
                     const seen = new Set<string>();
                     for (const a of links) {
                         const href = a.getAttribute('href') || '';
@@ -3114,14 +3184,14 @@ class ContentService {
                     });
                 }
 
-                console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername}`);
+                console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} (Puppeteer)`);
             } finally {
                 await browser.close().catch(() => {});
             }
         } catch (error: any) {
             console.warn(`⚠️ [Twitter/X] Failed to fetch profile @${cleanUsername}: ${error.message}`);
         }
-        return results;
+        return results.slice(0, limit);
     }
 }
 
