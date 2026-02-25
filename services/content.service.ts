@@ -3154,6 +3154,12 @@ class ContentService {
                 await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
                 await new Promise(resolve => setTimeout(resolve, 15000));
 
+                // Ждём появления хотя бы одной ссылки на твит (до 25 сек)
+                try {
+                    await page.waitForSelector('a[href*="/status/"]', { timeout: 25000 }).catch(() => null);
+                } catch (_) {}
+                await new Promise(resolve => setTimeout(resolve, 3000));
+
                 for (let s = 0; s < 5; s++) {
                     await page.evaluate(() => window.scrollBy(0, 800));
                     await new Promise(resolve => setTimeout(resolve, 3000));
@@ -3161,23 +3167,30 @@ class ContentService {
 
                 const tweetData = await page.evaluate((uname: string) => {
                     const items: Array<{ id: string; text: string }> = [];
-                    const links = Array.from(document.querySelectorAll(`a[href*="/${uname}/status/"], a[href*="/status/"]`));
                     const seen = new Set<string>();
-                    for (const a of links) {
+                    // Ссылки из ленты: и по username, и любые /status/ID
+                    const selectors = [
+                        `a[href*="/${uname}/status/"]`,
+                        'a[href*="/status/"]',
+                        'article a[href*="status"]'
+                    ];
+                    const links: NodeListOf<HTMLAnchorElement> = document.querySelectorAll(selectors.join(', '));
+                    for (const a of Array.from(links)) {
                         const href = a.getAttribute('href') || '';
                         const match = href.match(/\/status\/(\d+)/);
                         if (match && !seen.has(match[1])) {
                             seen.add(match[1]);
                             const tweetEl = a.closest('article');
                             const textEl = tweetEl?.querySelector('[data-testid="tweetText"]');
-                            const text = textEl?.textContent?.trim() || '';
+                            const text = (textEl?.textContent?.trim() || '').slice(0, 500);
                             items.push({ id: match[1], text });
                         }
                     }
-                    return items;
+                    return { items, linkCount: links.length };
                 }, cleanUsername);
 
-                for (const item of tweetData) {
+                const items = tweetData.items || [];
+                for (const item of items) {
                     if (results.length >= limit) break;
                     if (seenIds.has(item.id)) continue;
                     seenIds.add(item.id);
@@ -3187,6 +3200,9 @@ class ContentService {
                     });
                 }
 
+                if (results.length === 0 && (tweetData as any).linkCount !== undefined) {
+                    console.log(`⚠️ [Twitter/X] Puppeteer found ${(tweetData as any).linkCount} links on page for @${cleanUsername}, but 0 tweet IDs extracted (page may show "Something went wrong" or require login)`);
+                }
                 console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} (Puppeteer)`);
             } finally {
                 await browser.close().catch(() => {});
