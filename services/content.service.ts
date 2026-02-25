@@ -55,22 +55,14 @@ class ContentService {
             return await this.extractTwitterPostContent(url);
         }
         
-        // Ссылка на профиль Twitter/X (без /status/) — контент не извлекаем, чтобы не парсить как статью
-        try {
-            const toParse = (url || '').trim().split('?')[0].split('#')[0].trim() || url.trim();
-            if (!toParse || !toParse.startsWith('http')) { /* skip */ } else {
-                const parsed = new URL(toParse);
-                const host = parsed.hostname.toLowerCase();
-                const pathname = parsed.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
-                const isTwitterHost = host === 'twitter.com' || host === 'x.com' || host.endsWith('.twitter.com') || host.endsWith('.x.com');
-                const isProfilePath = /^[a-zA-Z0-9_]+$/.test(pathname) && pathname.toLowerCase() !== 'i';
-                if (isTwitterHost && isProfilePath) {
-                    console.log(`🐦 [Twitter/X] Profile URL detected in extractContentFromUrl, throwing TWITTER_PROFILE_URL: ${pathname}`);
-                    throw new Error('TWITTER_PROFILE_URL');
-                }
+        // Ссылка на профиль Twitter/X (без /status/) — контент не извлекаем, бросаем сразу (regex, не зависит от URL parsing)
+        const twitterProfileMatch = (url || '').trim().match(/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/([a-zA-Z0-9_]+)(?:\/|$|\?|#)/i);
+        if (twitterProfileMatch) {
+            const username = twitterProfileMatch[1];
+            if (username && username.toLowerCase() !== 'i') {
+                console.log(`🐦 [Twitter/X] Profile URL detected in extractContentFromUrl, throwing TWITTER_PROFILE_URL: @${username}`);
+                throw new Error('TWITTER_PROFILE_URL');
             }
-        } catch (e: any) {
-            if (e?.message === 'TWITTER_PROFILE_URL') throw e;
         }
         
         // Определяем тип URL
@@ -3116,11 +3108,13 @@ class ContentService {
         }
 
         // Метод 2: Nitter — простой HTML без тяжёлого JS (публичные инстансы могут быть нестабильны)
-        try {
-            const nitterUrl = `https://nitter.net/${cleanUsername}`;
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000);
-            const res = await fetch(nitterUrl, {
+        const nitterInstances = ['https://nitter.net', 'https://nitter.poast.org'];
+        for (const base of nitterInstances) {
+            try {
+                const nitterUrl = `${base}/${cleanUsername}`;
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 12000);
+                const res = await fetch(nitterUrl, {
                 headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
                 signal: controller.signal
             });
@@ -3138,28 +3132,31 @@ class ContentService {
                 const uniqueIds = Array.from(new Set(ids));
                 addFromIds(uniqueIds);
                 if (results.length > 0) {
-                    console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} via Nitter`);
+                    console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} via Nitter (${base})`);
                     return results.slice(0, limit);
                 }
             }
         } catch (e: any) {
-            console.log(`⚠️ [Twitter/X] Nitter fallback failed: ${e?.message || e}`);
+            console.log(`⚠️ [Twitter/X] Nitter (${base}) failed: ${e?.message || e}`);
+        }
         }
 
-        // Метод 3: Puppeteer — полная загрузка ленты (увеличены ожидание и прокрутки)
+        // Метод 3: Puppeteer — полная загрузка ленты (увеличены ожидание и прокрутки для X.com)
         try {
             console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer...`);
             const launchOptions = await this.getPuppeteerLaunchOptions();
             const browser = await puppeteer.launch(launchOptions);
             try {
                 const page = await browser.newPage();
+                await page.setViewport({ width: 1280, height: 800 });
                 await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-                await new Promise(resolve => setTimeout(resolve, 12000));
+                await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+                await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
+                await new Promise(resolve => setTimeout(resolve, 15000));
 
-                for (let s = 0; s < 3; s++) {
-                    await page.evaluate(() => window.scrollBy(0, 600));
-                    await new Promise(resolve => setTimeout(resolve, 2500));
+                for (let s = 0; s < 5; s++) {
+                    await page.evaluate(() => window.scrollBy(0, 800));
+                    await new Promise(resolve => setTimeout(resolve, 3000));
                 }
 
                 const tweetData = await page.evaluate((uname: string) => {
