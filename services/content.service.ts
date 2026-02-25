@@ -3142,31 +3142,31 @@ class ContentService {
         }
 
         // Метод 3: Puppeteer — полная загрузка ленты (с таймаутом, чтобы не зависать)
-        const PUPPETEER_PROFILE_TIMEOUT_MS = 95000; // 95 сек — при нескольких профилях подряд первый Chrome может ещё закрываться
+        const PUPPETEER_PROFILE_TIMEOUT_MS = 130000; // 130 сек — X.com на Railway грузится медленно
         try {
-            // Пауза перед запуском — даёт предыдущему браузеру время закрыться при обработке нескольких профилей подряд
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            // Пауза перед запуском — даёт предыдущему браузеру время закрыться при нескольких профилях подряд
+            await new Promise(resolve => setTimeout(resolve, 4000));
             console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer (timeout ${PUPPETEER_PROFILE_TIMEOUT_MS / 1000}s)...`);
             const puppeteerTask = (async () => {
                 const launchOptions = await this.getPuppeteerLaunchOptions();
                 const browser = await puppeteer.launch(launchOptions);
                 try {
                     const page = await browser.newPage();
-                    await page.setDefaultTimeout(20000);
+                    await page.setDefaultTimeout(25000);
                     await page.setViewport({ width: 1280, height: 800 });
                     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
                     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-                    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
-                    await new Promise(resolve => setTimeout(resolve, 10000));
+                    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                    await new Promise(resolve => setTimeout(resolve, 8000));
 
                     try {
-                        await page.waitForSelector('a[href*="/status/"]', { timeout: 15000 }).catch(() => null);
+                        await page.waitForSelector('a[href*="/status/"]', { timeout: 12000 }).catch(() => null);
                     } catch (_) {}
-                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    await new Promise(resolve => setTimeout(resolve, 1500));
 
                     for (let s = 0; s < 3; s++) {
                         await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
-                        await new Promise(resolve => setTimeout(resolve, 2000));
+                        await new Promise(resolve => setTimeout(resolve, 1500));
                     }
 
                     const tweetData = await page.evaluate((uname: string) => {
