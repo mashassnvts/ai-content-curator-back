@@ -3141,72 +3141,74 @@ class ContentService {
         }
         }
 
-        // Метод 3: Puppeteer — полная загрузка ленты (увеличены ожидание и прокрутки для X.com)
+        // Метод 3: Puppeteer — полная загрузка ленты (с таймаутом, чтобы не зависать)
+        const PUPPETEER_PROFILE_TIMEOUT_MS = 70000; // 70 сек макс — избегаем зависания и OOM на Railway
         try {
-            console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer...`);
-            const launchOptions = await this.getPuppeteerLaunchOptions();
-            const browser = await puppeteer.launch(launchOptions);
-            try {
-                const page = await browser.newPage();
-                await page.setViewport({ width: 1280, height: 800 });
-                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-                await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-                await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 90000 });
-                await new Promise(resolve => setTimeout(resolve, 15000));
-
-                // Ждём появления хотя бы одной ссылки на твит (до 25 сек)
+            console.log(`🐦 [Twitter/X] Fetching last ${limit} tweets from @${cleanUsername} via Puppeteer (timeout ${PUPPETEER_PROFILE_TIMEOUT_MS / 1000}s)...`);
+            const puppeteerTask = (async () => {
+                const launchOptions = await this.getPuppeteerLaunchOptions();
+                const browser = await puppeteer.launch(launchOptions);
                 try {
-                    await page.waitForSelector('a[href*="/status/"]', { timeout: 25000 }).catch(() => null);
-                } catch (_) {}
-                await new Promise(resolve => setTimeout(resolve, 3000));
+                    const page = await browser.newPage();
+                    await page.setDefaultTimeout(20000);
+                    await page.setViewport({ width: 1280, height: 800 });
+                    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
+                    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
+                    await new Promise(resolve => setTimeout(resolve, 10000));
 
-                for (let s = 0; s < 5; s++) {
-                    await page.evaluate(() => window.scrollBy(0, 800));
-                    await new Promise(resolve => setTimeout(resolve, 3000));
-                }
+                    try {
+                        await page.waitForSelector('a[href*="/status/"]', { timeout: 15000 }).catch(() => null);
+                    } catch (_) {}
+                    await new Promise(resolve => setTimeout(resolve, 2000));
 
-                const tweetData = await page.evaluate((uname: string) => {
-                    const items: Array<{ id: string; text: string }> = [];
-                    const seen = new Set<string>();
-                    // Ссылки из ленты: и по username, и любые /status/ID
-                    const selectors = [
-                        `a[href*="/${uname}/status/"]`,
-                        'a[href*="/status/"]',
-                        'article a[href*="status"]'
-                    ];
-                    const links: NodeListOf<HTMLAnchorElement> = document.querySelectorAll(selectors.join(', '));
-                    for (const a of Array.from(links)) {
-                        const href = a.getAttribute('href') || '';
-                        const match = href.match(/\/status\/(\d+)/);
-                        if (match && !seen.has(match[1])) {
-                            seen.add(match[1]);
-                            const tweetEl = a.closest('article');
-                            const textEl = tweetEl?.querySelector('[data-testid="tweetText"]');
-                            const text = (textEl?.textContent?.trim() || '').slice(0, 500);
-                            items.push({ id: match[1], text });
-                        }
+                    for (let s = 0; s < 3; s++) {
+                        await page.evaluate(() => window.scrollBy(0, 600)).catch(() => {});
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                     }
-                    return { items, linkCount: links.length };
-                }, cleanUsername);
 
-                const items = tweetData.items || [];
-                for (const item of items) {
-                    if (results.length >= limit) break;
-                    if (seenIds.has(item.id)) continue;
-                    seenIds.add(item.id);
-                    results.push({
-                        url: `https://x.com/${cleanUsername}/status/${item.id}`,
-                        text: item.text || undefined
-                    });
-                }
+                    const tweetData = await page.evaluate((uname: string) => {
+                        const items: Array<{ id: string; text: string }> = [];
+                        const seen = new Set<string>();
+                        const selectors = [`a[href*="/${uname}/status/"]`, 'a[href*="/status/"]', 'article a[href*="status"]'];
+                        const links = document.querySelectorAll(selectors.join(', '));
+                        for (const a of Array.from(links)) {
+                            const href = a.getAttribute('href') || '';
+                            const match = href.match(/\/status\/(\d+)/);
+                            if (match && !seen.has(match[1])) {
+                                seen.add(match[1]);
+                                const tweetEl = a.closest('article');
+                                const textEl = tweetEl?.querySelector('[data-testid="tweetText"]');
+                                const text = (textEl?.textContent?.trim() || '').slice(0, 500);
+                                items.push({ id: match[1], text });
+                            }
+                        }
+                        return { items, linkCount: links.length };
+                    }, cleanUsername);
 
-                if (results.length === 0 && (tweetData as any).linkCount !== undefined) {
-                    console.log(`⚠️ [Twitter/X] Puppeteer found ${(tweetData as any).linkCount} links on page for @${cleanUsername}, but 0 tweet IDs extracted (page may show "Something went wrong" or require login)`);
+                    const items = tweetData?.items || [];
+                    for (const item of items) {
+                        if (results.length >= limit) break;
+                        if (seenIds.has(item.id)) continue;
+                        seenIds.add(item.id);
+                        results.push({ url: `https://x.com/${cleanUsername}/status/${item.id}`, text: item.text || undefined });
+                    }
+
+                    if (results.length === 0 && tweetData?.linkCount !== undefined) {
+                        console.log(`⚠️ [Twitter/X] Puppeteer found ${tweetData.linkCount} links for @${cleanUsername}, 0 tweet IDs (page may show "Something went wrong")`);
+                    }
+                    console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} (Puppeteer)`);
+                } finally {
+                    await browser.close().catch(() => {});
                 }
-                console.log(`✓ [Twitter/X] Fetched ${results.length} tweet URLs from @${cleanUsername} (Puppeteer)`);
-            } finally {
-                await browser.close().catch(() => {});
-            }
+            })();
+
+            await Promise.race([
+                puppeteerTask,
+                new Promise<void>((_, reject) =>
+                    setTimeout(() => reject(new Error('Puppeteer timeout: X.com took too long to load')), PUPPETEER_PROFILE_TIMEOUT_MS)
+                )
+            ]);
         } catch (error: any) {
             console.warn(`⚠️ [Twitter/X] Failed to fetch profile @${cleanUsername}: ${error.message}`);
         }
