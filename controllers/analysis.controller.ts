@@ -1222,6 +1222,23 @@ const runAnalysisInBackground = async (
         const uniqueUrls = Array.from(allUrls).slice(0, MAX_URLS_LIMIT);
         if (userId) feedbackHistory = await UserService.getUserFeedbackHistory(userId);
 
+        // Лог для отладки Twitter/каналов: что именно попадёт в цикл
+        if (uniqueUrls.length > 0) {
+            const first = uniqueUrls[0];
+            const twUser = (() => {
+                try {
+                    const u = (first || '').trim().split('?')[0].split('#')[0];
+                    const p = new URL(u || first);
+                    const host = p.hostname.toLowerCase();
+                    const pathname = p.pathname.replace(/\/+$/, '').replace(/^\/+/, '');
+                    const segs = pathname.split('/').filter(Boolean);
+                    if ((host === 'twitter.com' || host === 'x.com') && segs.length === 1 && /^[a-zA-Z0-9_]+$/.test(segs[0]) && segs[0].toLowerCase() !== 'i') return segs[0];
+                } catch (_) {}
+                return null;
+            })();
+            console.log(`[analysis] runAnalysisInBackground: uniqueUrls.length=${uniqueUrls.length}, firstUrl=${first}, twitterUsername=${twUser ?? 'none'}`);
+        }
+
         // Если есть только текст (без URL), устанавливаем itemType: 'text'
         if (texts.length > 0 && uniqueUrls.length === 0) {
             analysisJobs.set(jobId, {
@@ -1298,11 +1315,14 @@ const runAnalysisInBackground = async (
 
         for (let i = 0; i < uniqueUrls.length; i++) {
             const url = uniqueUrls[i];
-            const urlNorm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
+            const urlNorm = (url || '').trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || (url || '').trim();
             const telegramChannelMatch = urlNorm.match(/^https?:\/\/t\.me\/([^\/]+)\/?$/);
-            const twitterUsernameFromLoop = getTwitterUsernameFromUrl(url);
+            let twitterUsernameFromLoop = getTwitterUsernameFromUrl(url);
+            if (!twitterUsernameFromLoop && urlNorm !== url) {
+                twitterUsernameFromLoop = getTwitterUsernameFromUrl(urlNorm);
+            }
             if (twitterUsernameFromLoop) {
-                console.log(`[analysis] Twitter profile detected in loop: @${twitterUsernameFromLoop}`);
+                console.log(`[analysis] Twitter profile detected in loop: @${twitterUsernameFromLoop} (url: ${url})`);
             }
 
             if (telegramChannelMatch) {
