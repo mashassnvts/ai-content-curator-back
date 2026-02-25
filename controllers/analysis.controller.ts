@@ -1212,7 +1212,12 @@ const runAnalysisInBackground = async (
                     // Если ошибка при получении плейлиста, добавляем исходный URL
                     allUrls.add(url);
                 }
-            } 
+            }
+            // Twitter/X профиль — нормализуем (убираем ? и #), чтобы распознавание в цикле работало надёжно
+            else if (/^https?:\/\/(?:www\.)?(?:twitter\.com|x\.com)\/[a-zA-Z0-9_]+\/?/i.test(url.split('?')[0].split('#')[0])) {
+                const norm = url.trim().split('?')[0].split('#')[0].replace(/\/+$/, '') || url.trim();
+                allUrls.add(norm);
+            }
             // Обычный URL без плейлиста
             else {
                 allUrls.add(url);
@@ -1588,6 +1593,9 @@ const runAnalysisInBackground = async (
                     allFetched = await contentService.getTwitterProfilePosts(twitterUsername, POSTS_TO_ANALYZE);
                 } catch (fetchError: any) {
                     console.error(`❌ [analysis] Failed to fetch tweets from @${twitterUsername}:`, fetchError.message);
+                    const hint = !(process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS)
+                        ? ' Добавьте SCRAPINGBEE_API_KEY в .env для обхода блокировок X. Или используйте браузерное расширение (см. TWITTER_CONTENT_SOURCES.md) и вставьте текст постов.'
+                        : ' Попробуйте браузерное расширение (см. TWITTER_CONTENT_SOURCES.md) и вставьте текст постов.';
                     urlResults.push({
                         originalUrl: url,
                         isChannel: true,
@@ -1597,7 +1605,7 @@ const runAnalysisInBackground = async (
                             totalPosts: 0,
                             relevantPosts: 0,
                             posts: [],
-                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}. Возможно, профиль приватный или недоступен.`
+                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}.${hint}`
                         }
                     });
                     continue;
@@ -1606,6 +1614,9 @@ const runAnalysisInBackground = async (
                 const posts = allFetched.slice(0, POSTS_TO_ANALYZE);
 
                 if (posts.length === 0) {
+                    const hint = !(process.env.SCRAPINGBEE_API_KEY || process.env.SCRAPINGBEE_API_KEYS)
+                        ? ' Добавьте SCRAPINGBEE_API_KEY в .env. Или используйте браузерное расширение и вставьте текст постов.'
+                        : ' Используйте браузерное расширение (TWITTER_CONTENT_SOURCES.md) и вставьте текст постов.';
                     urlResults.push({
                         originalUrl: url,
                         isChannel: true,
@@ -1615,7 +1626,7 @@ const runAnalysisInBackground = async (
                             totalPosts: 0,
                             relevantPosts: 0,
                             posts: [],
-                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}. Возможно, профиль приватный или недоступен.`
+                            recommendation: `Не удалось получить твиты из профиля @${twitterUsername}.${hint}`
                         }
                     });
                     continue;
