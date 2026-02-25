@@ -171,8 +171,10 @@ export async function getChannelPosts(
             try {
                 console.log(`🌐 [getChannelPosts] Trying web scraping for @${username}...`);
                 const puppeteer = (await import('puppeteer-extra')).default;
-                const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
-                puppeteer.use(StealthPlugin());
+                if (!process.env.DISABLE_PUPPETEER_STEALTH) {
+                    const StealthPlugin = (await import('puppeteer-extra-plugin-stealth')).default;
+                    puppeteer.use(StealthPlugin());
+                }
 
                 const channelUrl = `https://t.me/s/${username}`;
                 

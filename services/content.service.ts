@@ -8,9 +8,11 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import * as os from 'os';
 
-// Initialize Puppeteer with plugins
-puppeteer.use(StealthPlugin());
-puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
+// Stealth/Adblocker can cause "Requesting main frame too early!" in Docker/Railway; disable via env
+if (!process.env.DISABLE_PUPPETEER_STEALTH) {
+    puppeteer.use(StealthPlugin());
+    puppeteer.use(AdblockerPlugin({ blockTrackers: true }));
+}
 
 class ContentService {
     /**
