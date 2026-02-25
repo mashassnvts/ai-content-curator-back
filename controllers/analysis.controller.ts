@@ -777,7 +777,7 @@ export const processSingleUrlAnalysis = async (
             }
         }
         
-        const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType);
+        const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType as 'transcript' | 'metadata' | 'article' | 'telegram');
         
         // Завершаем этап 2
         if (jobId && itemIndex != null) {
@@ -1586,7 +1586,7 @@ const runAnalysisInBackground = async (
                     currentStage: 0,
                     channelUsername: twitterUsername,
                     isTwitterProfile: true
-                });
+                } as any);
 
                 let allFetched: Array<{ url: string; text?: string }> = [];
                 try {
@@ -1641,7 +1641,7 @@ const runAnalysisInBackground = async (
                     currentStage: 0,
                     channelUsername: twitterUsername,
                     isTwitterProfile: true
-                });
+                } as any);
 
                 const analyzedPosts: Array<{ url: string; score: number; verdict: string; summary?: string; reasoning?: string; text?: string }> = [];
                 let relevantCount = 0;
