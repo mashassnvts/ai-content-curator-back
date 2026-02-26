@@ -425,6 +425,7 @@ const processTextAnalysis = async (
                     summary: analysisResult.summary,
                     reasoning: analysisResult.reasoning,
                     originalText: text, // Сохраняем оригинальный текст
+                    extractedThemes: extractedThemes?.length ? JSON.stringify(extractedThemes) : null,
                 });
                 analysisHistoryId = historyRecord.id;
                 console.log(`💾 Saved text analysis to history (ID: ${analysisHistoryId})`);
@@ -479,7 +480,7 @@ const processTextAnalysis = async (
             ...analysisResult,
             relevanceLevel: relevanceLevelResult,
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
-            extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
+            extractedThemes: extractedThemes?.length ? extractedThemes : undefined, // Темы/смыслы из контента (для read и unread)
             analysisHistoryId,
             extractedContent: text, // Полный текст для Q&A после анализа
             error: false
@@ -1039,6 +1040,7 @@ export const processSingleUrlAnalysis = async (
                     summary: analysisResult.summary,
                     reasoning: analysisResult.reasoning,
                     interests,
+                    extractedThemes: extractedThemes?.length ? JSON.stringify(extractedThemes) : null,
                 });
                 analysisHistoryId = historyRecord.id;
                 console.log(`💾 Saved URL analysis to history (ID: ${analysisHistoryId})`);
@@ -1115,7 +1117,7 @@ export const processSingleUrlAnalysis = async (
             ...analysisResult,
             relevanceLevel: relevanceLevelResult,
             semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
-            extractedThemes: mode === 'read' ? extractedThemes : undefined, // Извлеченные теги для режима 'read'
+            extractedThemes: extractedThemes?.length ? extractedThemes : undefined, // Темы/смыслы из контента (для read и unread)
             analysisHistoryId, // Добавляем ID записи в истории
             extractedContent: content, // Полный контент для Q&A после анализа
             error: false

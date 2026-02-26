@@ -3,6 +3,16 @@ import TelegramChannel from '../models/TelegramChannel';
 import TelegramChannelPost from '../models/TelegramChannelPost';
 import AnalysisHistory from '../models/AnalysisHistory';
 import { getChannelInfo, processPostUrl } from '../services/telegram-channel.service';
+
+function parseExtractedThemes(val: string | null | undefined): string[] {
+    if (!val) return [];
+    try {
+        const parsed = JSON.parse(val);
+        return Array.isArray(parsed) ? parsed.filter((t: any) => typeof t === 'string') : [];
+    } catch {
+        return [];
+    }
+}
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { processSingleUrlAnalysis } from './analysis.controller';
@@ -36,7 +46,7 @@ export const getUserChannels = async (req: AuthenticatedRequest, res: Response):
                     model: AnalysisHistory,
                     as: 'AnalysisHistory',
                     required: false,
-                    attributes: ['id', 'score', 'verdict', 'summary', 'reasoning', 'url', 'createdAt']
+                    attributes: ['id', 'score', 'verdict', 'summary', 'reasoning', 'extractedThemes', 'url', 'createdAt']
                 }] : []
             }]
         });
@@ -55,7 +65,8 @@ export const getUserChannels = async (req: AuthenticatedRequest, res: Response):
                         score: p.AnalysisHistory.score,
                         verdict: p.AnalysisHistory.verdict,
                         summary: p.AnalysisHistory.summary,
-                        reasoning: p.AnalysisHistory.reasoning
+                        reasoning: p.AnalysisHistory.reasoning,
+                        extractedThemes: parseExtractedThemes(p.AnalysisHistory.extractedThemes)
                     } : null
                 })) : undefined;
                 return {
@@ -276,134 +287,22 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
                 isActive: true,
                 checkFrequency: checkFrequency as 'daily' | 'weekly'
             });
-        } else {
-            console.log(`ℹ️ [telegram-channel] Channel @${username} already added for user ${userId}, analyzing latest posts...`);
         }
 
-        // Анализируем последние N постов из канала (по умолчанию 6, можно настроить через initialPostsCount)
-        const postsToAnalyze = Math.min(Math.max(parseInt(String(initialPostsCount)) || 6, 1), 20);
-        
-        // Запрашиваем больше постов (буфер), т.к. страница может подгрузить не все — потом возьмём нужное количество
-        const fetchLimit = Math.max(postsToAnalyze + 5, 15);
-        
-        console.log(`📊 [telegram-channel] Will analyze last ${postsToAnalyze} posts from @${username} for user ${userId} (fetching up to ${fetchLimit})`);
-        const { getChannelPosts } = await import('../services/telegram-channel.service');
-        const allFetched = await getChannelPosts(username, fetchLimit);
-        const posts = allFetched.slice(0, postsToAnalyze);
-        
-        const analyzedPosts: Array<{
-            url: string;
-            score: number;
-            verdict: string;
-            summary?: string;
-            text?: string;
-        }> = [];
-        
-        let relevantCount = 0;
-        
-        if (posts.length > 0) {
-            // Получаем теги пользователя (облако смыслов) — приоритет над интересами
-            const userTags = await getUserTagsCached(userId);
-            const contextForAnalysis = userTags.length > 0
-                ? userTags.map(t => t.tag).join(', ')
-                : (await UserInterest.findAll({ where: { userId, isActive: true } })).map(ui => ui.interest).join(', ');
-
-            if (!contextForAnalysis) {
-                console.log(`ℹ️ [telegram-channel] No tags or interests for user ${userId}, skipping post analysis`);
-            }
-
-            if (contextForAnalysis && posts.length > 0) {
-                console.log(`🔍 [telegram-channel] Analyzing ${posts.length} posts from @${username} for user ${userId}...`);
-                
-                // Анализируем каждый пост
-                for (const post of posts) {
-                    if (post.url) {
-                        try {
-                            const analysisResult = await processSingleUrlAnalysis(
-                                post.url,
-                                contextForAnalysis,
-                                [],
-                                userId,
-                                'unread' // режим "стоит ли читать"
-                            );
-
-                            if (analysisResult && typeof analysisResult === 'object' && !('error' in analysisResult && analysisResult.error)) {
-                                const result = analysisResult as any;
-                                if (result && typeof result.score === 'number' && typeof result.verdict === 'string') {
-                                    analyzedPosts.push({
-                                        url: post.url,
-                                        score: result.score,
-                                        verdict: result.verdict,
-                                        summary: typeof result.summary === 'string' ? result.summary : undefined,
-                                        text: post.text || undefined
-                                    });
-                                    
-                                    // Сохраняем пост в БД
-                                    const match = post.url.match(/https?:\/\/t\.me\/[^\/]+\/(\d+)/);
-                                    const messageId = match ? parseInt(match[1], 10) : post.messageId;
-                                    
-                                    let channelPost = await TelegramChannelPost.findOne({
-                                        where: {
-                                            channelId: channel.id,
-                                            messageId
-                                        }
-                                    });
-                                    
-                                    if (!channelPost) {
-                                        channelPost = await TelegramChannelPost.create({
-                                            channelId: channel.id,
-                                            messageId,
-                                            postUrl: post.url,
-                                            postText: post.text
-                                        });
-                                    }
-                                    
-                                    if (result.analysisHistoryId) {
-                                        await channelPost.update({
-                                            analysisHistoryId: result.analysisHistoryId
-                                        });
-                                    }
-                                    
-                                    if (result.score >= 70) {
-                                        relevantCount++;
-                                    }
-                                }
-                            }
-                        } catch (analysisError: any) {
-                            console.error(`⚠️ [telegram-channel] Failed to analyze post ${post.url}:`, analysisError.message);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Формируем рекомендацию на основе результатов
-        let recommendation = '';
-        if (analyzedPosts.length === 0) {
-            recommendation = posts.length === 0
-                ? 'Не удалось получить посты из канала. Возможно, канал приватный или недоступен.'
-                : 'Не удалось проанализировать посты. Добавьте темы в облако смыслов: проанализируйте статьи в режиме "Я прочитал и понравилось".';
-        } else if (relevantCount === 0) {
-            recommendation = `Проанализировано ${analyzedPosts.length} постов. К сожалению, ни один из них не совпадает с вашими тегами в облаке смыслов (порог релевантности: 70%). Возможно, стоит пересмотреть выбор канала или проанализировать больше статей в режиме "Я прочитал и понравилось".`;
-        } else {
-            recommendation = `Проанализировано ${analyzedPosts.length} постов. Найдено ${relevantCount} релевантных постов (${Math.round(relevantCount / analyzedPosts.length * 100)}%), которые могут быть вам интересны. Канал стоит читать!`;
-        }
+        // Анализ постов — в фоне. Сразу отвечаем пользователю, чтобы не было таймаута.
+        checkUserChannelsNow(userId).catch((err: any) => {
+            console.error('❌ [telegram-channel] Background analysis failed:', err.message);
+        });
 
         return res.status(201).json({
             success: true,
-            message: 'Channel analyzed successfully',
+            message: 'Channel added. Posts are being analyzed in the background — refresh the list in 1–2 minutes.',
             channel: {
                 id: channel.id,
                 channelUsername: channel.channelUsername,
                 channelId: channel.channelId,
                 isActive: channel.isActive,
                 checkFrequency: channel.checkFrequency
-            },
-            analysis: {
-                totalPosts: analyzedPosts.length,
-                relevantPosts: relevantCount,
-                posts: analyzedPosts,
-                recommendation
             }
         });
     } catch (error: any) {
