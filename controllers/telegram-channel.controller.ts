@@ -1,7 +1,9 @@
 import { Response } from 'express';
 import TelegramChannel from '../models/TelegramChannel';
 import TelegramChannelPost from '../models/TelegramChannelPost';
+import AnalysisHistory from '../models/AnalysisHistory';
 import { getChannelInfo, processPostUrl } from '../services/telegram-channel.service';
+import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { processSingleUrlAnalysis } from './analysis.controller';
 import UserInterest from '../models/UserInterest';
@@ -10,6 +12,7 @@ import { getUserTagsCached } from '../services/semantic.service';
 /**
  * GET /api/telegram-channels
  * Получить список каналов пользователя
+ * Query: ?includePosts=true — включить посты с анализом (score, summary, verdict, reasoning)
  */
 export const getUserChannels = async (req: AuthenticatedRequest, res: Response): Promise<Response> => {
     try {
@@ -18,6 +21,8 @@ export const getUserChannels = async (req: AuthenticatedRequest, res: Response):
             return res.status(401).json({ message: 'Unauthorized' });
         }
 
+        const includePosts = req.query.includePosts === 'true';
+
         const channels = await TelegramChannel.findAll({
             where: { userId },
             order: [['created_at', 'DESC']],
@@ -25,26 +30,75 @@ export const getUserChannels = async (req: AuthenticatedRequest, res: Response):
                 model: TelegramChannelPost,
                 as: 'TelegramChannelPosts',
                 required: false,
-                limit: 1,
-                order: [['created_at', 'DESC']]
+                limit: includePosts ? 50 : 1,
+                order: [['created_at', 'DESC']],
+                include: includePosts ? [{
+                    model: AnalysisHistory,
+                    as: 'AnalysisHistory',
+                    required: false,
+                    attributes: ['id', 'score', 'verdict', 'summary', 'reasoning', 'url', 'createdAt']
+                }] : []
             }]
         });
 
         return res.status(200).json({
             success: true,
-            channels: channels.map(ch => ({
-                id: ch.id,
-                channelUsername: ch.channelUsername,
-                channelId: ch.channelId,
-                isActive: ch.isActive,
-                checkFrequency: ch.checkFrequency,
-                lastCheckedAt: ch.lastCheckedAt,
-                createdAt: ch.createdAt
-            }))
+            channels: channels.map(ch => {
+                const posts = (ch as any).TelegramChannelPosts || [];
+                const postsWithAnalysis = includePosts ? posts.map((p: any) => ({
+                    id: p.id,
+                    messageId: p.messageId,
+                    postUrl: p.postUrl,
+                    postText: (p.postText || '').slice(0, 300),
+                    createdAt: p.createdAt,
+                    analysis: p.AnalysisHistory ? {
+                        score: p.AnalysisHistory.score,
+                        verdict: p.AnalysisHistory.verdict,
+                        summary: p.AnalysisHistory.summary,
+                        reasoning: p.AnalysisHistory.reasoning
+                    } : null
+                })) : undefined;
+                return {
+                    id: ch.id,
+                    channelUsername: ch.channelUsername,
+                    channelId: ch.channelId,
+                    isActive: ch.isActive,
+                    checkFrequency: ch.checkFrequency,
+                    lastCheckedAt: ch.lastCheckedAt,
+                    createdAt: ch.createdAt,
+                    posts: postsWithAnalysis
+                };
+            })
         });
     } catch (error: any) {
         console.error('Error getting user channels:', error);
         return res.status(500).json({ message: 'Error getting channels', error: error.message });
+    }
+};
+
+/**
+ * POST /api/telegram-channels/check-now
+ * Проверить каналы прямо сейчас (подтянуть новые посты и проанализировать их)
+ */
+export const checkChannelsNow = async (req: AuthenticatedRequest, res: Response): Promise<Response> => {
+    try {
+        const userId = req.user?.userId;
+        if (!userId) {
+            return res.status(401).json({ message: 'Unauthorized' });
+        }
+
+        // Запускаем проверку в фоне, сразу отвечаем клиенту
+        checkUserChannelsNow(userId).catch((err: any) => {
+            console.error('❌ [telegram-channel] check-now failed:', err.message);
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: 'Проверка каналов запущена. Обновите страницу через минуту, чтобы увидеть новые посты.'
+        });
+    } catch (error: any) {
+        console.error('Error starting channel check:', error);
+        return res.status(500).json({ message: 'Error starting check', error: error.message });
     }
 };
 
