@@ -31,11 +31,13 @@ async function analyzeChannelForUser(
     }
 
     // Получаем новые посты
-    const posts = await getChannelPosts(
+    const isNewChannel = !channel.lastPostMessageId;
+    const limit = isNewChannel ? 6 : 20; // Для нового канала — 5-6 постов, для проверки — до 20
+    const posts = (await getChannelPosts(
         channel.channelUsername,
-        20, // Максимум 20 новых постов за раз
+        limit + 5, // Буфер для выборки
         channel.lastPostMessageId || undefined
-    );
+    )).slice(0, limit);
 
     if (posts.length === 0) {
         console.log(`ℹ️ [telegram-channel-monitor] No new posts found for channel @${channel.channelUsername} (user ${userId})`);
