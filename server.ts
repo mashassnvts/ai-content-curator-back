@@ -309,6 +309,27 @@ const startServer = async () => {
             console.warn('⚠️ Could not check/add original_text column:', columnError.message);
         }
         
+        // Проверяем и добавляем колонку extracted_themes в analysis_history если её нет
+        try {
+            const extractedThemesColumns = await sequelize.query(
+                `SELECT column_name FROM information_schema.columns 
+                 WHERE table_name = 'analysis_history' AND column_name = 'extracted_themes'`,
+                { type: QueryTypes.SELECT }
+            ) as any[];
+            
+            if (extractedThemesColumns.length === 0) {
+                console.log('📊 Adding extracted_themes column to analysis_history...');
+                await sequelize.query(`
+                    ALTER TABLE analysis_history ADD COLUMN IF NOT EXISTS extracted_themes TEXT;
+                `);
+                console.log('✅ Column extracted_themes added to analysis_history');
+            } else {
+                console.log('✅ Column extracted_themes exists in analysis_history');
+            }
+        } catch (extractedThemesError: any) {
+            console.warn('⚠️ Could not check/add extracted_themes column:', extractedThemesError.message);
+        }
+        
         // Проверяем и создаем таблицу qa_history если её нет
         const hasQAHistoryTable = tables.includes('qa_history');
         if (!hasQAHistoryTable) {
