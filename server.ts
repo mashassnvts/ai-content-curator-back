@@ -431,7 +431,7 @@ const startServer = async () => {
             historyCleanupService.startPeriodicCleanup(cleanupIntervalHours);
 
             // Запускаем мониторинг Telegram-каналов
-            const channelCheckIntervalHours = parseInt(process.env.TELEGRAM_CHANNEL_CHECK_INTERVAL_HOURS || '6', 10);
+            const channelCheckIntervalHours = parseInt(process.env.TELEGRAM_CHANNEL_CHECK_INTERVAL_HOURS || '4', 10);
             const enableChannelMonitoring = process.env.ENABLE_TELEGRAM_CHANNEL_MONITORING === 'true';
             if (enableChannelMonitoring) {
                 console.log(`📢 Starting Telegram channel monitoring (every ${channelCheckIntervalHours} hours)...`);
