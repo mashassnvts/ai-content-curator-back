@@ -14,6 +14,7 @@ function parseExtractedThemes(val: string | null | undefined): string[] {
     }
 }
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
+import { getChannelPosts } from '../services/telegram-channel.service';
 import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { processSingleUrlAnalysis } from './analysis.controller';
 import UserInterest from '../models/UserInterest';
@@ -278,7 +279,6 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
         });
 
         if (!channel) {
-            // Получаем информацию о канале и создаем запись
             const channelInfo = await getChannelInfo(username);
             channel = await TelegramChannel.create({
                 userId,
@@ -289,21 +289,82 @@ export const addChannel = async (req: AuthenticatedRequest, res: Response): Prom
             });
         }
 
-        // Анализ постов — в фоне. Сразу отвечаем пользователю, чтобы не было таймаута.
-        checkUserChannelsNow(userId).catch((err: any) => {
-            console.error('❌ [telegram-channel] Background analysis failed:', err.message);
-        });
+        // Синхронный анализ последних постов — как на главной странице (саммари, теги, смыслы, совпадение)
+        const postsToAnalyze = Math.min(Math.max(parseInt(String(req.body.initialPostsCount)) || 4, 1), 6);
+        const allFetched = await getChannelPosts(username, postsToAnalyze + 5);
+        const posts = allFetched.slice(0, postsToAnalyze);
+
+        const userTags = await getUserTagsCached(userId);
+        const contextForAnalysis = userTags.length > 0
+            ? userTags.map((t: { tag: string }) => t.tag).join(', ')
+            : (await UserInterest.findAll({ where: { userId, isActive: true } })).map(ui => ui.interest).join(', ');
+
+        const analyzedPosts: Array<{
+            url: string;
+            score: number;
+            verdict: string;
+            summary?: string;
+            reasoning?: string;
+            extractedThemes?: string[];
+        }> = [];
+        let lastMessageId = channel.lastPostMessageId || 0;
+
+        if (contextForAnalysis && posts.length > 0) {
+            console.log(`🔍 [telegram-channel] Analyzing ${posts.length} posts from @${username} for user ${userId}...`);
+            for (const post of posts) {
+                if (!post.url) continue;
+                try {
+                    const result = await processSingleUrlAnalysis(post.url, contextForAnalysis, [], userId, 'unread');
+                    if (result && typeof result === 'object' && !('error' in result && result.error)) {
+                        const res = result as any;
+                        if (res?.score != null && res?.verdict) {
+                            const match = post.url.match(/https?:\/\/t\.me\/[^\/]+\/(\d+)/);
+                            const messageId = match ? parseInt(match[1], 10) : post.messageId;
+                            let channelPost = await TelegramChannelPost.findOne({
+                                where: { channelId: channel.id, messageId }
+                            });
+                            if (!channelPost) {
+                                channelPost = await TelegramChannelPost.create({
+                                    channelId: channel.id,
+                                    messageId,
+                                    postUrl: post.url,
+                                    postText: post.text
+                                });
+                            }
+                            if (res.analysisHistoryId) {
+                                await channelPost.update({ analysisHistoryId: res.analysisHistoryId });
+                            }
+                            analyzedPosts.push({
+                                url: post.url,
+                                score: res.score,
+                                verdict: res.verdict,
+                                summary: res.summary,
+                                reasoning: res.reasoning,
+                                extractedThemes: Array.isArray(res.extractedThemes) ? res.extractedThemes : undefined
+                            });
+                            if (messageId > lastMessageId) lastMessageId = messageId;
+                        }
+                    }
+                } catch (err: any) {
+                    console.error(`⚠️ [telegram-channel] Failed to analyze post ${post.url}:`, err.message);
+                }
+            }
+            await channel.update({ lastCheckedAt: new Date(), lastPostMessageId: lastMessageId });
+        }
 
         return res.status(201).json({
             success: true,
-            message: 'Channel added. Posts are being analyzed in the background — refresh the list in 1–2 minutes.',
+            message: analyzedPosts.length > 0
+                ? `Канал добавлен. Проанализировано ${analyzedPosts.length} постов.`
+                : 'Канал добавлен. Добавьте темы в облако смыслов для анализа постов.',
             channel: {
                 id: channel.id,
                 channelUsername: channel.channelUsername,
                 channelId: channel.channelId,
                 isActive: channel.isActive,
                 checkFrequency: channel.checkFrequency
-            }
+            },
+            posts: analyzedPosts
         });
     } catch (error: any) {
         console.error('Error adding channel:', error);
@@ -341,6 +402,8 @@ export const deleteChannel = async (req: AuthenticatedRequest, res: Response): P
             return res.status(404).json({ message: 'Channel not found' });
         }
 
+        // Удаляем посты до канала (на случай если CASCADE не настроен в БД)
+        await TelegramChannelPost.destroy({ where: { channelId } });
         await channel.destroy();
 
         return res.status(200).json({
