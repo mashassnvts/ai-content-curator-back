@@ -211,8 +211,8 @@ export async function checkAllChannels(): Promise<void> {
                 totalAnalyzed += result.analyzed;
                 totalRelevant += result.relevant;
 
-                if (result.relevant > 0) {
-                    // Отправляем уведомление пользователю
+                if (result.analyzed > 0) {
+                    // Уведомляем о новых постах (в т.ч. если релевантных нет)
                     await sendNotification(channel.userId, channel.channelUsername, result);
                 }
 
