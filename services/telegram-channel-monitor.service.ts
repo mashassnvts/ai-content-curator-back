@@ -311,7 +311,7 @@ async function sendNotification(
  */
 let cronTask: ReturnType<typeof cron.schedule> | null = null;
 
-export function startChannelMonitoring(intervalHours: number = 6): void {
+export function startChannelMonitoring(intervalHours: number = 4): void {
     if (cronTask) {
         console.log('⚠️ [telegram-channel-monitor] Monitoring already started');
         return;
