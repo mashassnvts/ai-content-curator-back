@@ -78,6 +78,6 @@ TelegramChannelPost.init({
 
 // Импортируем модели после их определения для избежания циклических зависимостей
 TelegramChannelPost.belongsTo(TelegramChannel, { foreignKey: 'channelId' });
-TelegramChannelPost.belongsTo(AnalysisHistory, { foreignKey: 'analysisHistoryId' });
+TelegramChannelPost.belongsTo(AnalysisHistory, { foreignKey: 'analysisHistoryId', as: 'AnalysisHistory' });
 
 export default TelegramChannelPost;
