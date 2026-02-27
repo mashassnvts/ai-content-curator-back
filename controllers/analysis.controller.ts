@@ -13,6 +13,8 @@ import ContentRelevanceScore from '../models/ContentRelevanceScore';
 import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
+import { retainArticle } from '../services/hindsight.service';
+import { retainArticle as retainGraphitiArticle } from '../services/graphiti.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
 import UserInterest from '../models/UserInterest';
@@ -448,6 +450,25 @@ const processTextAnalysis = async (
                         console.warn(`⚠️ Failed to generate/save embedding: ${embeddingError.message}`);
                         // Не прерываем основной процесс, если эмбеддинг не удалось сохранить
                     }
+                }
+                // Hindsight + Graphiti: сохраняем в память агента (опционально)
+                if (userId && analysisResult?.summary) {
+                    retainArticle({
+                        userId,
+                        url: `text://${text.substring(0, 100)}...`,
+                        summary: analysisResult.summary,
+                        themes: extractedThemes ?? [],
+                        verdict: analysisResult.verdict,
+                        sourceType: 'text',
+                    }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
+                    retainGraphitiArticle({
+                        userId,
+                        url: `text://${text.substring(0, 100)}...`,
+                        summary: analysisResult.summary,
+                        themes: extractedThemes ?? [],
+                        verdict: analysisResult.verdict,
+                        sourceType: 'text',
+                    }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
                 }
             } catch (error: any) {
                 console.warn(`⚠️ Failed to save text analysis to history: ${error.message}`);
@@ -1078,6 +1099,25 @@ export const processSingleUrlAnalysis = async (
                         console.warn(`⚠️ Failed to generate/save embedding for ID ${analysisHistoryId}: ${embeddingError.message}`);
                         // Не прерываем основной процесс
                     }
+                // Hindsight + Graphiti: сохраняем в память агента (опционально)
+                if (userId && analysisResult?.summary) {
+                    retainArticle({
+                        userId,
+                        url,
+                        summary: analysisResult.summary,
+                        themes: extractedThemes ?? [],
+                        verdict: analysisResult.verdict,
+                        sourceType: sourceType || 'article',
+                    }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
+                    retainGraphitiArticle({
+                        userId,
+                        url,
+                        summary: analysisResult.summary,
+                        themes: extractedThemes ?? [],
+                        verdict: analysisResult.verdict,
+                        sourceType: sourceType || 'article',
+                    }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
+                }
                 } else {
                     // Fallback: если summary слишком короткий, используем summary + reasoning (но это не идеально)
                     const textForEmbedding = [

@@ -9,6 +9,7 @@ import feedbackRoutes from './routes/feedback.routes';
 import botRoutes from './routes/bot.routes';
 import relevanceLevelRoutes from './routes/relevance-level.routes';
 import telegramChannelRoutes from './routes/telegram-channel.routes';
+import notificationRoutes from './routes/notification.routes';
 import './models/User';
 import './models/UserInterest';
 import './models/AnalysisHistory';
@@ -20,6 +21,7 @@ import './models/UserSemanticTag';
 import './models/AnalysisStageStats';
 import TelegramChannel from './models/TelegramChannel';
 import TelegramChannelPost from './models/TelegramChannelPost';
+import './models/AppNotification';
 import historyCleanupService from './services/history-cleanup.service';
 
 // Устанавливаем связи между моделями после их импорта
@@ -90,6 +92,7 @@ app.use('/api/feedback', feedbackRoutes);
 app.use('/api/bot', botRoutes);
 app.use('/api/relevance-level', relevanceLevelRoutes);
 app.use('/api/telegram-channels', telegramChannelRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/', (req: Request, res: Response) => {
     res.send('API is running...');
@@ -358,6 +361,33 @@ const startServer = async () => {
             }
         } else {
             console.log('✅ Table qa_history exists');
+        }
+        
+        // Проверяем и создаем таблицу app_notifications если её нет
+        const hasAppNotificationsTable = tables.includes('app_notifications');
+        if (!hasAppNotificationsTable) {
+            console.log('📊 Creating app_notifications table...');
+            try {
+                await sequelize.query(`
+                    CREATE TABLE IF NOT EXISTS app_notifications (
+                        id SERIAL PRIMARY KEY,
+                        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        message TEXT NOT NULL,
+                        channel_username VARCHAR(255) NOT NULL,
+                        analyzed_count INT NOT NULL DEFAULT 0,
+                        read BOOLEAN NOT NULL DEFAULT false,
+                        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_app_notifications_user ON app_notifications(user_id);
+                    CREATE INDEX IF NOT EXISTS idx_app_notifications_read ON app_notifications(read);
+                `);
+                console.log('✅ Table app_notifications created successfully');
+            } catch (createError: any) {
+                console.warn('⚠️ Could not create app_notifications table:', (createError as Error).message);
+            }
+        } else {
+            console.log('✅ Table app_notifications exists');
         }
         
         // Проверяем и добавляем поля для восстановления пароля в users если их нет
