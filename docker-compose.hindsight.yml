@@ -1,0 +1,19 @@
+# Hindsight — память агента для AI Content Curator
+# Запуск: docker compose -f docker-compose.hindsight.yml up -d
+# API: http://localhost:8888
+# В .env сервера: HINDSIGHT_URL=http://localhost:8888
+
+services:
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:latest
+    ports:
+      - "8888:8888"
+      - "9999:9999"
+    environment:
+      HINDSIGHT_API_LLM_PROVIDER: gemini
+      HINDSIGHT_API_LLM_API_KEY: ${GEMINI_API_KEY}
+    volumes:
+      - hindsight-data:/home/hindsight/.pg0
+
+volumes:
+  hindsight-data:

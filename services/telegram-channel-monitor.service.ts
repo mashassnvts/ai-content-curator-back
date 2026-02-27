@@ -214,7 +214,9 @@ export async function checkAllChannels(): Promise<void> {
                 totalRelevant += result.relevant;
 
                 if (result.analyzed > 0) {
-                    // Уведомляем о новых постах (в т.ч. если релевантных нет)
+                    // Уведомление в приложении
+                    await createInAppNotification(channel.userId, channel.channelUsername, result);
+                    // Уведомление в Telegram (если привязан)
                     await sendNotification(channel.userId, channel.channelUsername, result);
                 }
 
@@ -261,6 +263,9 @@ export async function checkUserChannelsNow(userId: number): Promise<void> {
                 const result = await analyzeChannelForUser(channel, userId);
                 totalAnalyzed += result.analyzed;
                 totalRelevant += result.relevant;
+                if (result.analyzed > 0) {
+                    await createInAppNotification(userId, channel.channelUsername, result);
+                }
                 console.log(`✅ [telegram-channel-monitor] On-demand @${channel.channelUsername}: analyzed ${result.analyzed}, relevant ${result.relevant}`);
             } catch (error: any) {
                 console.error(`❌ [telegram-channel-monitor] On-demand: error checking @${channel.channelUsername} for user ${userId}:`, error.message);
@@ -274,7 +279,30 @@ export async function checkUserChannelsNow(userId: number): Promise<void> {
 }
 
 /**
- * Отправляет уведомление пользователю о новых релевантных постах
+ * Создаёт уведомление в приложении о новых проанализированных постах
+ */
+async function createInAppNotification(
+    userId: number,
+    channelUsername: string,
+    result: AnalysisResult
+): Promise<void> {
+    try {
+        const { default: AppNotification } = await import('../models/AppNotification');
+        await AppNotification.create({
+            userId,
+            message: result.analyzed === 1
+                ? `Новый пост в @${channelUsername} проанализирован`
+                : `В канале @${channelUsername} проанализировано ${result.analyzed} новых постов`,
+            channelUsername,
+            analyzedCount: result.analyzed,
+        });
+    } catch (err: any) {
+        console.error(`❌ [telegram-channel-monitor] Failed to create in-app notification:`, err.message);
+    }
+}
+
+/**
+ * Отправляет уведомление пользователю о новых релевантных постах (Telegram)
  */
 async function sendNotification(
     userId: number,

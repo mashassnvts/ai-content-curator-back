@@ -1,6 +1,8 @@
 import { GoogleGenAI } from '@google/genai';
 import UserSemanticTag from '../models/UserSemanticTag';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
+import { recallForUser } from './hindsight.service';
+import { searchForUser } from './graphiti.service';
 
 const apiKey = process.env.GEMINI_API_KEY;
 
@@ -1115,16 +1117,36 @@ async function getRAGContextForRecommendation(
             0.45 // Порог схожести 45%
         );
 
-        if (similarArticles.length === 0) {
-            return '';
-        }
-
-        return `\n\n**Контекст из похожих статей в вашей истории:**
+        let context = '';
+        if (similarArticles.length > 0) {
+            context += `\n\n**Контекст из похожих статей в вашей истории:**
 ${similarArticles.map((a, idx) => 
     `${idx + 1}. ${a.url} (${Math.round(a.similarity * 100)}% похоже)${a.summary ? `\n   Саммари: ${a.summary.substring(0, 150)}${a.summary.length > 150 ? '...' : ''}` : ''}`
 ).join('\n\n')}
 
 Используй эту информацию: если статья похожа на те, что пользователь читал ранее, это может быть хорошим признаком релевантности.`;
+        }
+
+        // Hindsight: дополняем контекст памятью агента (если включён)
+        const recallQuery = textForEmbedding.length > 300 ? textForEmbedding.substring(0, 300) + '...' : textForEmbedding;
+        const hindsightMemories = await recallForUser(userId, recallQuery, { maxTokens: 512 });
+        if (hindsightMemories?.trim()) {
+            context += `\n\n**Память о прочитанном пользователем:**
+${hindsightMemories.trim()}
+
+Учитывай это при рекомендации.`;
+        }
+
+        // Graphiti: дополняем контекст фактами из графа знаний (если включён)
+        const graphitiFacts = await searchForUser(userId, recallQuery, { maxFacts: 5 });
+        if (graphitiFacts?.trim()) {
+            context += `\n\n**Факты из графа знаний пользователя:**
+${graphitiFacts.trim()}
+
+Учитывай связи между темами при рекомендации.`;
+        }
+
+        return context;
     } catch (error: any) {
         console.warn(`⚠️ [RAG Recommendation] Failed to get RAG context: ${error.message}`);
         return '';
