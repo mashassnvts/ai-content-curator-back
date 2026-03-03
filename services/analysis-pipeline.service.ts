@@ -69,6 +69,7 @@ async function extractContentWithRetry(url: string): Promise<{ content: string; 
             return { content: extracted.content, sourceType: extracted.sourceType };
         } catch (e: any) {
             lastError = e;
+            if (e?.message === 'TWITTER_PROFILE_URL') throw e;
             if (attempt < EXTRACT_RETRY_COUNT) {
                 await new Promise((r) => setTimeout(r, EXTRACT_RETRY_DELAY_MS));
             }
@@ -129,29 +130,28 @@ export async function runFullAnalysisPipeline(
         await onStageEnd?.(0, sourceType === 'transcript' ? 'video' : 'article');
         if (sourceType === 'metadata') onJobUpdate?.({ useMetadata: true });
         if (!statsItemType) statsItemType = sourceType === 'transcript' ? 'video' : 'article';
+        if (sourceType === 'transcript' || sourceType === 'metadata') {
+            onStageStart?.(1);
+            await onStageEnd?.(1, statsItemType);
+        }
+        if (sourceType === 'transcript') console.log(`✅ Using FULL VIDEO TRANSCRIPT for analysis (${content.length} chars)`);
+        else if (sourceType === 'telegram') console.log(`✅ Using FULL TELEGRAM POST CONTENT for analysis (${content.length} chars)`);
+        else if (sourceType === 'metadata') console.log(`⚠️ Using METADATA ONLY for analysis (${content.length} chars) - NOT full video content`);
     }
     if (!statsItemType) statsItemType = 'article';
 
     // Валидация контента (для URL)
-    if (input.type === 'url' && sourceType !== 'metadata') {
-        const errorIndicators = ['Failed to scrape', 'Failed to extract', 'Could not find', 'Chrome not found', 'Error:', 'error:'];
-        if (errorIndicators.some((ind) => content.toLowerCase().includes(ind.toLowerCase()))) {
-            return {
-                originalUrl: url,
-                url,
-                sourceType,
-                error: true,
-                message: `Не удалось извлечь контент из URL. ${content.substring(0, 200)}`,
-            };
+    if (input.type === 'url') {
+        const isMetadataWithWarning = sourceType === 'metadata' && content.includes('⚠️ ВАЖНО');
+        const minLength = isMetadataWithWarning ? 20 : 30;
+        if (!isMetadataWithWarning) {
+            const errorIndicators = ['Failed to scrape', 'Failed to extract', 'Could not find', 'Chrome not found', 'Error:', 'error:', 'Exception:', 'exception:'];
+            if (errorIndicators.some((ind) => content.toLowerCase().includes(ind.toLowerCase()))) {
+                return { originalUrl: url, url, sourceType, error: true, message: `Не удалось извлечь контент из URL. ${content.substring(0, 200)}` };
+            }
         }
-        if (content.trim().length < 20) {
-            return {
-                originalUrl: url,
-                url,
-                sourceType,
-                error: true,
-                message: `Контент слишком короткий (${content.trim().length} символов).`,
-            };
+        if (content.trim().length < minLength) {
+            return { originalUrl: url, url, sourceType, error: true, message: `Контент слишком короткий (${content.trim().length} символов).` };
         }
     }
 
@@ -192,8 +192,9 @@ export async function runFullAnalysisPipeline(
                         semanticVerdict: 'У вас пока нет тегов в "облако смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось".',
                     };
                 } else {
+                    const contentForRag = content.length > 50000 ? content.substring(0, 50000) : content;
                     try {
-                        const semanticVerdict = await generateSemanticRecommendation(themes, userTagsWithWeights, semanticComparisonResult, content, userId);
+                        const semanticVerdict = await generateSemanticRecommendation(themes, userTagsWithWeights, semanticComparisonResult, contentForRag, userId);
                         semanticComparisonResult = { ...semanticComparisonResult, semanticVerdict };
                     } catch {
                         const pct = semanticComparisonResult.matchPercentage;
