@@ -16,6 +16,7 @@ import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from
 import { retainArticle } from '../services/hindsight.service';
 import { retainArticle as retainGraphitiArticle } from '../services/graphiti.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
+import { addAnalysisJob } from '../services/analysis-queue.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
 import UserInterest from '../models/UserInterest';
 import AnalysisStageStats from '../models/AnalysisStageStats';
@@ -1188,7 +1189,7 @@ export const getAnalysisStatus = async (req: Request, res: Response): Promise<Re
     return res.json(job);
 };
 
-const runAnalysisInBackground = async (
+export const runAnalysisInBackground = async (
     jobId: string,
     urlInput: string | string[],
     interests: string,
@@ -1918,7 +1919,10 @@ const handleAnalysisRequest = async (req: Request, res: Response): Promise<Respo
         // Асинхронный режим: возвращаем jobId сразу, анализ в фоне (обход таймаута Railway)
         const jobId = crypto.randomUUID();
         analysisJobs.set(jobId, { status: 'pending' });
-        setImmediate(() => runAnalysisInBackground(jobId, urlInput, interests, analysisMode, userId));
+        const queued = await addAnalysisJob({ jobId, urlInput, interests, analysisMode, userId });
+        if (!queued) {
+            setImmediate(() => runAnalysisInBackground(jobId, urlInput, interests, analysisMode, userId));
+        }
         
         // Удаляем задачу через 1 час (очистка памяти)
         setTimeout(() => analysisJobs.delete(jobId), 3600000);

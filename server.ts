@@ -23,6 +23,8 @@ import TelegramChannel from './models/TelegramChannel';
 import TelegramChannelPost from './models/TelegramChannelPost';
 import './models/AppNotification';
 import historyCleanupService from './services/history-cleanup.service';
+import { initAnalysisQueue } from './services/analysis-queue.service';
+import { runAnalysisInBackground } from './controllers/analysis.controller';
 
 // Устанавливаем связи между моделями после их импорта
 TelegramChannel.hasMany(TelegramChannelPost, { foreignKey: 'channelId', as: 'TelegramChannelPosts' });
@@ -443,6 +445,9 @@ const startServer = async () => {
         console.warn('💡 Tip: Check that DATABASE_URL is correct and PostgreSQL service is running.');
         dbConnected = false;
     }
+
+    // Инициализируем очередь анализа (Bull + Redis) для параллельной обработки нескольких пользователей
+    initAnalysisQueue((data) => runAnalysisInBackground(data.jobId, data.urlInput, data.interests, data.analysisMode, data.userId));
 
     // Запускаем сервер независимо от результата подключения к БД
     const server = app.listen(PORT, '0.0.0.0', () => {
