@@ -15,6 +15,15 @@ const IS_DEBUG = LOG_LEVEL === 'debug';
 
 let client: HindsightClient | null = null;
 
+/** Очередь вызовов к Hindsight: по одному запросу за раз (сервис не выдерживает параллельные запросы). */
+let hintLock: Promise<void> = Promise.resolve();
+
+function withHindsightLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = hintLock.then(() => fn());
+    hintLock = next.then(() => undefined, () => undefined);
+    return next;
+}
+
 function getClient(): HindsightClient | null {
     if (!HINDSIGHT_URL) return null;
     if (!client) {
@@ -59,10 +68,12 @@ export async function retainArticle(params: {
     const content = `Пользователь проанализировал статью: ${url}. Саммари: ${summary}. Темы/смыслы: ${themesStr}.${verdict ? ` Вердикт: ${verdict}.` : ''}${sourceType ? ` Источник: ${sourceType}.` : ''}`;
 
     try {
-        await c.retain(bankId(userId), content, {
-            context: 'article_analysis',
-            metadata: { url, sourceType: sourceType || 'article' },
-        });
+        await withHindsightLock(() =>
+            c.retain(bankId(userId), content, {
+                context: 'article_analysis',
+                metadata: { url, sourceType: sourceType || 'article' },
+            })
+        );
         console.log(`📝 [Hindsight] Retained article for user ${userId} (${url.substring(0, 50)}...)`);
     } catch (e: any) {
         console.warn(`⚠️ [Hindsight] retainArticle failed: ${e.message}`);
@@ -88,10 +99,12 @@ export async function retainPost(params: {
     const content = `Пост из канала @${channelUsername}: ${postUrl}. Саммари: ${summary}. Темы: ${themesStr}.${verdict ? ` Вердикт: ${verdict}.` : ''}`;
 
     try {
-        await c.retain(bankId(userId), content, {
-            context: 'channel_post',
-            metadata: { postUrl, channel: channelUsername },
-        });
+        await withHindsightLock(() =>
+            c.retain(bankId(userId), content, {
+                context: 'channel_post',
+                metadata: { postUrl, channel: channelUsername },
+            })
+        );
         console.log(`📝 [Hindsight] Retained post for user ${userId} (@${channelUsername})`);
     } catch (e: any) {
         console.warn(`⚠️ [Hindsight] retainPost failed: ${e.message}`);
@@ -110,9 +123,11 @@ export async function recallForUser(
     if (!c) return '';
 
     try {
-        const result = await c.recall(bankId(userId), query, {
-            maxTokens: options?.maxTokens ?? 1024,
-        });
+        const result = await withHindsightLock(() =>
+            c.recall(bankId(userId), query, {
+                maxTokens: options?.maxTokens ?? 1024,
+            })
+        );
         const results = (result as { results?: Array<{ text?: string }> })?.results ?? [];
         const content = results.map((r) => r.text || '').filter(Boolean).join('\n');
         if (content.length > 0) {
@@ -133,9 +148,11 @@ export async function reflectForUser(userId: number, query: string): Promise<str
     if (!c) return '';
 
     try {
-        const result = await c.reflect(bankId(userId), query, {
-            budget: 'low',
-        });
+        const result = await withHindsightLock(() =>
+            c.reflect(bankId(userId), query, {
+                budget: 'low',
+            })
+        );
         const text = (result as { text?: string })?.text ?? '';
         return typeof text === 'string' ? text : '';
     } catch (e: any) {
