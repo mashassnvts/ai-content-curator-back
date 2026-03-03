@@ -13,9 +13,6 @@ import ContentRelevanceScore from '../models/ContentRelevanceScore';
 import ytpl from 'ytpl';
 import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache, getUserTagsCached, generateSemanticRecommendation } from '../services/semantic.service';
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
-import { retainArticle } from '../services/hindsight.service';
-import { retainArticle as retainGraphitiArticle } from '../services/graphiti.service';
-import { validateBeforeRetain } from '../services/retain-validator.service';
 import { runFullAnalysisPipeline } from '../services/analysis-pipeline.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { addAnalysisJob } from '../services/analysis-queue.service';
@@ -261,9 +258,6 @@ export const processSingleUrlAnalysis = async (
     itemIndex?: number,
     skipHistorySave: boolean = false // Флаг для пропуска сохранения в историю (для постов каналов)
 ) => {
-    // Сохраняем полный контент для использования в эмбеддинге
-    let fullContentForEmbedding: string | null = null;
-    
     try {
         // Проверяем, является ли это ссылкой на Telegram канал (без ID сообщения)
         const telegramChannelMatch = url.match(/^https?:\/\/t\.me\/([^\/]+)$/);
@@ -364,22 +358,41 @@ export const processSingleUrlAnalysis = async (
             } as any;
         }
 
-        // Этап 0: Загрузка контента
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
-                startStageTracking(jobId, 0);
-            }
-        }
-        
-        let content: string;
-        let sourceType: string;
+        // Композитный пайплайн: извлечение (с retry) + анализ
         try {
-            const extracted = await contentService.extractContentFromUrl(url);
-            content = extracted.content;
-            sourceType = extracted.sourceType;
+            const result = await runFullAnalysisPipeline(
+                { type: 'url', url },
+                {
+                    interests,
+                    userId,
+                    mode,
+                    feedbackHistory,
+                    skipHistorySave,
+                    jobId,
+                    itemIndex,
+                    onStageStart: (stageId) => {
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            if (job) {
+                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: stageId });
+                                startStageTracking(jobId, stageId);
+                            }
+                        }
+                    },
+                    onStageEnd: async (stageId, itemType) => {
+                        if (jobId && itemIndex != null) {
+                            await endStageTracking(jobId, stageId, itemType as 'article' | 'video' | 'urls' | 'text');
+                        }
+                    },
+                    onJobUpdate: (updates) => {
+                        if (jobId && itemIndex != null) {
+                            const job = analysisJobs.get(jobId);
+                            if (job) analysisJobs.set(jobId, { ...job, ...updates });
+                        }
+                    },
+                }
+            );
+            return result;
         } catch (extractError: any) {
             if (extractError?.message === 'TWITTER_PROFILE_URL') {
                 const twitterUsername = twitterUsernameFromUrl(url);
@@ -410,491 +423,6 @@ export const processSingleUrlAnalysis = async (
             }
             throw extractError;
         }
-        
-        // Определяем тип контента для статистики: video (если есть транскрипт) или article (статья/метаданные)
-        const statsItemType: 'article' | 'video' = sourceType === 'transcript' ? 'video' : 'article';
-        const useMetadata = sourceType === 'metadata';
-        
-        // Обновляем job с информацией о метаданных для фронтенда
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            if (job) {
-                analysisJobs.set(jobId, { ...job, useMetadata });
-            }
-        }
-        
-        // Завершаем этап 0
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
-            // Используем statsItemType для статистики (article/video вместо urls)
-            await endStageTracking(jobId, 0, statsItemType);
-        }
-        
-        // Этап 1: Извлечение транскрипта (для видео) или метаданных (для статей)
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            if (job) {
-                if (sourceType === 'transcript') {
-                    // Видео с транскриптом
-                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1, useMetadata: false });
-                    startStageTracking(jobId, 1);
-                    // Транскрипт уже извлечен в extractContentFromUrl, завершаем этап сразу
-                    await endStageTracking(jobId, 1, statsItemType);
-                } else if (sourceType === 'metadata') {
-                    // Используются метаданные вместо транскрипта
-                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1, useMetadata: true });
-                    startStageTracking(jobId, 1);
-                    // Метаданные уже извлечены, завершаем этап сразу
-                    await endStageTracking(jobId, 1, statsItemType);
-                }
-                // Для статей (sourceType === 'article') этап 1 пропускается
-            }
-        }
-        
-        // Логируем тип источника для диагностики
-        if (sourceType === 'transcript') {
-            console.log(`✅ Using FULL VIDEO TRANSCRIPT for analysis (${content.length} chars)`);
-        } else if (sourceType === 'telegram') {
-            console.log(`✅ Using FULL TELEGRAM POST CONTENT for analysis (${content.length} chars)`);
-        } else if (sourceType === 'metadata') {
-            console.log(`⚠️ Using METADATA ONLY for analysis (${content.length} chars) - NOT full video content`);
-        }
-        
-        // Сохраняем весь контент для эмбеддинга (максимум 50000 символов для очень длинных статей)
-        // Используем весь текст для максимально точных эмбеддингов
-        const MAX_CONTENT_FOR_EMBEDDING = 50000;
-        fullContentForEmbedding = content.length > MAX_CONTENT_FOR_EMBEDDING ? content.substring(0, MAX_CONTENT_FOR_EMBEDDING) : content;
-
-        // Проверяем, не является ли контент сообщением об ошибке
-        // НО: пропускаем метаданные с предупреждениями (они все равно содержат полезную информацию)
-        const isMetadataWithWarning = sourceType === 'metadata' && content.includes('⚠️ ВАЖНО');
-        
-        // Для метаданных с предупреждениями разрешаем даже короткий контент (минимум 20 символов)
-        // Для обычного контента минимум 30 символов (было 50, но некоторые статьи могут быть короче)
-        const minLength = isMetadataWithWarning ? 20 : 30;
-        
-        // Проверяем на ошибки только если это НЕ метаданные с предупреждением
-        if (!isMetadataWithWarning) {
-            const errorIndicators = [
-                'Failed to scrape',
-                'Failed to extract',
-                'Could not find',
-                'Chrome not found',
-                'Cannot find module',
-                'Error:',
-                'error:',
-                'Exception:',
-                'exception:',
-            ];
-            
-            // Исключаем проверку на "Не удалось извлечь", так как это может быть частью предупреждения в метаданных
-            const isErrorMessage = errorIndicators.some(indicator => 
-                content.toLowerCase().includes(indicator.toLowerCase())
-            );
-            
-            // Проверяем длину контента
-            const contentLength = content.trim().length;
-            
-            if (isErrorMessage) {
-                throw new Error(`Не удалось извлечь контент из URL. ${content.substring(0, 200)}`);
-            }
-            
-            // Если контент слишком короткий, но не является ошибкой - это может быть метаданные
-            if (contentLength < minLength && contentLength >= 20) {
-                console.warn(`⚠️ Content is short (${contentLength} chars), but proceeding with analysis (might be metadata)`);
-                // Продолжаем анализ, но помечаем как метаданные
-            } else if (contentLength < 20) {
-                throw new Error(`Не удалось извлечь контент из URL. Контент слишком короткий (${contentLength} символов). ${content.substring(0, 200)}`);
-            }
-        } else {
-            // Если это метаданные с предупреждением, логируем это, но продолжаем анализ
-            console.log(`⚠️ Using metadata with warning for analysis (content length: ${content.length} chars)`);
-            
-            // Проверяем минимальную длину даже для метаданных
-            if (content.trim().length < minLength) {
-                throw new Error(`Не удалось извлечь достаточно информации из URL. ${content.substring(0, 200)}`);
-            }
-        }
-
-        // Этап 2: AI-анализ
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
-                startStageTracking(jobId, 2);
-            }
-        }
-        
-        const analysisResult = await analyzeContentWithAI(content, interests, feedbackHistory, url, userId, sourceType as 'transcript' | 'metadata' | 'article' | 'telegram');
-        
-        // Завершаем этап 2
-        if (jobId && itemIndex != null) {
-            await endStageTracking(jobId, 2, statsItemType);
-        }
-        
-        // Этап 3: Генерация эмбеддинга (начинаем отслеживание, если будет использоваться)
-        if (jobId && itemIndex != null && userId && analysisResult?.summary) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'urls';
-            if (job && analysisResult.summary.length > 50) {
-                startStageTracking(jobId, 3);
-            }
-        }
-        
-        // Обработка семантических тегов в зависимости от режима
-        let semanticComparisonResult = null;
-        let extractedThemes: string[] = [];
-        
-        if (userId) {
-            try {
-                if (IS_DEBUG) {
-                    console.log(`🎯 [Semantic Tags] Extracting themes from content for user ${userId} (mode: ${mode})...`);
-                }
-                // Этап 6: Извлечение тем (раньше, чтобы показать прогресс)
-                if (jobId && itemIndex != null) {
-                    const job = analysisJobs.get(jobId);
-                    if (job) {
-                        analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 6 });
-                        startStageTracking(jobId, 6);
-                    }
-                }
-                
-                const themes = await extractThemes(content);
-                
-                // Завершаем этап 6
-                if (jobId && itemIndex != null) {
-                    await endStageTracking(jobId, 6, statsItemType);
-                }
-                
-                if (themes.length > 0) {
-                    if (IS_DEBUG) {
-                        console.log(`📌 Extracted ${themes.length} themes:`, themes);
-                    }
-                    extractedThemes = themes; // Сохраняем для возврата в результате
-                    
-                    if (mode === 'read') {
-                        // Режим 'read': сохраняем теги в "облако смыслов" пользователя
-                        await saveUserSemanticTags(userId, themes);
-                        // Очищаем кэш после сохранения новых тегов
-                        clearUserTagsCache(userId);
-                        console.log(`✅ [Mode: read] Saved ${themes.length} semantic tags to database`);
-                    } else if (mode === 'unread') {
-                        // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
-                        // Этап 4: Семантическое сравнение (для видео/URL)
-                        if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            if (job) {
-                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
-                                startStageTracking(jobId, 4);
-                            }
-                        }
-                        
-                        const userTagsWithWeights = await getUserTagsCached(userId);
-                        
-                        semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
-                        
-                        // Завершаем этап 4
-                        if (jobId && itemIndex != null) {
-                            await endStageTracking(jobId, 4, statsItemType);
-                        }
-                        
-                        console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
-                        
-                        if (semanticComparisonResult.hasNoTags) {
-                            console.log(`ℹ️ [Mode: unread] User ${userId} has no tags yet - suggesting to use 'read' mode first`);
-                            // Добавляем стандартное сообщение для случая без тегов
-                            semanticComparisonResult = {
-                                ...semanticComparisonResult,
-                                semanticVerdict: 'У вас пока нет тегов в "облако смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
-                            };
-                        } else {
-                            // Генерируем AI-рекомендацию на основе сравнения тегов
-                            try {
-                                const semanticVerdict = await generateSemanticRecommendation(
-                                    themes,
-                                    userTagsWithWeights,
-                                    semanticComparisonResult,
-                                    fullContentForEmbedding || content, // Передаем контент статьи для RAG
-                                    userId // Передаем userId для RAG
-                                );
-                                // Добавляем рекомендацию в результат сравнения
-                                semanticComparisonResult = {
-                                    ...semanticComparisonResult,
-                                    semanticVerdict
-                                };
-                                console.log(`💡 [Mode: unread] Generated semantic recommendation (${semanticVerdict.length} chars)`);
-                            } catch (error: any) {
-                                console.error(`❌ [Mode: unread] Failed to generate semantic recommendation: ${error.message}`);
-                                console.error(`❌ [Mode: unread] Error stack:`, error.stack);
-                                // Добавляем fallback рекомендацию на основе процента совпадения
-                                let fallbackVerdict = '';
-                                if (semanticComparisonResult.matchPercentage >= 70) {
-                                    fallbackVerdict = `Эта статья хорошо соответствует вашим интересам (${semanticComparisonResult.matchPercentage}% совпадение тем). Рекомендуется к прочтению.`;
-                                } else if (semanticComparisonResult.matchPercentage >= 40) {
-                                    fallbackVerdict = `Статья частично соответствует вашим интересам (${semanticComparisonResult.matchPercentage}% совпадение). Может быть интересна для расширения кругозора.`;
-                                } else {
-                                    fallbackVerdict = `Статья имеет низкое совпадение с вашими интересами (${semanticComparisonResult.matchPercentage}%). Возможно, стоит поискать более релевантный контент.`;
-                                }
-                                semanticComparisonResult = {
-                                    ...semanticComparisonResult,
-                                    semanticVerdict: fallbackVerdict
-                                };
-                            }
-                        }
-                    }
-                } else {
-                    console.log(`ℹ️ No themes extracted from content`);
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ Failed to extract/process semantic tags: ${error.message}`);
-                // Не прерываем основной анализ, если извлечение тегов не удалось
-            }
-        }
-        
-        // Автоматически анализируем уровень релевантности для авторизированных пользователей
-        let relevanceLevelResult = null;
-        if (userId) {
-            try {
-                if (IS_DEBUG) {
-                    console.log(`📊 [Relevance Level] Starting automatic relevance level analysis for user ${userId}...`);
-                }
-                const interestsList = interests.split(',').map((i: string) => i.trim().toLowerCase());
-                
-                const userLevelsRecords = await UserInterestLevel.findAll({
-                    where: {
-                        userId,
-                        interest: interestsList,
-                    },
-                });
-
-                const userLevels = userLevelsRecords.map(ul => ({
-                    interest: ul.interest,
-                    level: ul.level,
-                }));
-
-                if (userLevels.length > 0) {
-                    console.log(`📊 [Relevance Level] Analyzing content level and user match for ${userLevels.length} interest(s)...`);
-                    
-                    // Оптимизированный анализ: анализируем все интересы за один запрос к API
-                    const interestsList = interests.split(',').map((i: string) => i.trim());
-                    const interestsWithLevels = interestsList
-                        .map(interest => {
-                            const userLevel = userLevels.find(ul => ul.interest.toLowerCase() === interest.toLowerCase());
-                            return userLevel ? { interest, userLevel: userLevel.level } : null;
-                        })
-                        .filter((item): item is { interest: string; userLevel: 'novice' | 'amateur' | 'professional' } => item !== null);
-
-                    if (interestsWithLevels.length > 0) {
-                        try {
-                            // Этап 5: Оценка сложности
-                            if (jobId && itemIndex != null) {
-                                const job = analysisJobs.get(jobId);
-                                if (job) {
-                                    analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 5 });
-                                    startStageTracking(jobId, 5);
-                                }
-                            }
-                            
-                            const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
-                            const relevanceResults = await Promise.race([
-                                analyzeRelevanceLevelForMultipleInterests(content, interestsWithLevels),
-                                new Promise<never>((_, reject) => 
-                                    setTimeout(() => reject(new Error('Relevance level analysis timeout')), 30000)
-                                )
-                            ]);
-                            
-                            // Завершаем этап 5
-                            if (jobId && itemIndex != null) {
-                                await endStageTracking(jobId, 5, statsItemType);
-                            }
-                            
-                            // Сохраняем оценку релевантности для каждого интереса
-                            for (const { interest, result } of relevanceResults) {
-                                try {
-                                    await ContentRelevanceScore.upsert({
-                                        userId,
-                                        interest: interest.toLowerCase(),
-                                        url,
-                                        contentLevel: result.contentLevel,
-                                        relevanceScore: result.relevanceScore,
-                                        explanation: result.explanation,
-                                    });
-                                    console.log(`💾 Saved relevance score for interest "${interest}": ${result.relevanceScore}/100 (content level: ${result.contentLevel})`);
-                                } catch (error: any) {
-                                    console.warn(`⚠️ Failed to save relevance score for interest "${interest}": ${error.message}`);
-                                }
-                            }
-                            
-                            // Используем первый результат для отображения (или усредняем)
-                            if (relevanceResults.length > 0) {
-                                relevanceLevelResult = relevanceResults[0].result;
-                                if (relevanceResults.length > 1) {
-                                    // Если несколько интересов, усредняем оценку
-                                    const avgScore = Math.round(relevanceResults.reduce((sum, r) => sum + r.result.relevanceScore, 0) / relevanceResults.length);
-                                    relevanceLevelResult = {
-                                        ...relevanceLevelResult,
-                                        relevanceScore: avgScore,
-                                        explanation: `Анализ для интересов: ${relevanceResults.map(r => r.interest).join(', ')}. ${relevanceLevelResult.explanation}`,
-                                    };
-                                }
-                                console.log(`✅ [Relevance Level] Analysis completed successfully:`);
-                                console.log(`   - Content Level: ${relevanceLevelResult.contentLevel}`);
-                                console.log(`   - User Level Match: ${relevanceLevelResult.userLevelMatch}`);
-                                console.log(`   - Relevance Score: ${relevanceLevelResult.relevanceScore}/100`);
-                            }
-                        } catch (error: any) {
-                            const errorMessage = error.message || '';
-                            const isQuotaExceeded = errorMessage.includes('quota exceeded') || 
-                                                   errorMessage.includes('QUOTA_EXCEEDED') ||
-                                                   errorMessage.includes('FreeTier') ||
-                                                   (error.status === 429 && errorMessage.includes('limit: 20'));
-                            
-                            if (isQuotaExceeded) {
-                                console.warn(`⏭️ [Relevance Level] Skipping analysis: API quota exceeded. Main analysis will continue without relevance level.`);
-                            } else if (errorMessage.includes('timeout')) {
-                                console.warn(`⏭️ [Relevance Level] Skipping analysis: timeout. Main analysis will continue without relevance level.`);
-                            } else {
-                                console.warn(`⚠️ Failed to analyze relevance level: ${error.message}`);
-                                console.warn(`   Stack: ${error.stack || 'No stack trace'}`);
-                            }
-                            // Не прерываем основной анализ, если анализ уровня релевантности не удался
-                        }
-                    }
-                } else {
-                    console.log(`⏭️ [Relevance Level] Skipping analysis: no user levels set for interests. User can set levels in profile.`);
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ [Relevance Level] Failed to analyze relevance level: ${error.message}`);
-                console.warn(`   Stack: ${error.stack || 'No stack trace'}`);
-                // Не прерываем основной анализ, если анализ уровня релевантности не удался
-            }
-        } else {
-            console.log(`⏭️ [Relevance Level] Skipping analysis: user not authenticated (guest mode)`);
-        }
-        
-        // Сохраняем результат анализа в историю и генерируем эмбеддинг (если пользователь авторизован)
-        // Пропускаем сохранение для постов каналов (они сохраняются как одна запись канала)
-        let analysisHistoryId: number | undefined = undefined;
-        if (userId && analysisResult?.summary && !skipHistorySave) {
-            try {
-                const historyRecord = await AnalysisHistory.create({
-                    userId,
-                    telegramId: null,
-                    url,
-                    sourceType,
-                    score: analysisResult.score,
-                    verdict: analysisResult.verdict,
-                    summary: analysisResult.summary,
-                    reasoning: analysisResult.reasoning,
-                    interests,
-                    extractedThemes: extractedThemes?.length ? JSON.stringify(extractedThemes) : null,
-                });
-                analysisHistoryId = historyRecord.id;
-                console.log(`💾 Saved URL analysis to history (ID: ${analysisHistoryId})`);
-                
-                // Генерируем и сохраняем эмбеддинг для векторного поиска
-                // ИСПРАВЛЕНИЕ: Используем только summary + URL для единообразия с поиском
-                // Это обеспечит точное соответствие эмбеддингов при сохранении и поиске
-                // Summary содержит основное содержание статьи, что достаточно для семантического поиска
-                if (analysisResult.summary && analysisResult.summary.length > 50) {
-                    try {
-                        // Используем только summary + URL для единообразия с поиском
-                        // Это обеспечит точное соответствие эмбеддингов при сохранении и поиске
-                        const textForEmbedding = [
-                            analysisResult.summary,
-                            url
-                        ].filter(Boolean).join('\n\n').trim();
-                        
-                        // Этап 3: Генерация эмбеддинга
-                        if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            if (job) {
-                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 3 });
-                            }
-                        }
-                        
-                        await generateAndSaveEmbedding(textForEmbedding, analysisHistoryId);
-                        
-                        // Завершаем этап 3
-                        if (jobId && itemIndex != null) {
-                            await endStageTracking(jobId, 3, statsItemType);
-                        }
-                        
-                        console.log(`✅ Generated and saved embedding for analysis_history ID: ${analysisHistoryId} (using summary + URL: ${textForEmbedding.length} chars)`);
-                    } catch (embeddingError: any) {
-                        console.warn(`⚠️ Failed to generate/save embedding for ID ${analysisHistoryId}: ${embeddingError.message}`);
-                        // Не прерываем основной процесс
-                    }
-                // Hindsight + Graphiti: сохраняем в память агента (опционально, после валидации)
-                if (userId && analysisResult?.summary) {
-                    const validation = validateBeforeRetain(analysisResult.summary, extractedThemes ?? [], content);
-                    if (validation.valid) {
-                        if (IS_DEBUG) console.log(`✅ [Retain Validator] Passed, saving to Hindsight/Graphiti (${url.substring(0, 50)}...)`);
-                        retainArticle({
-                            userId,
-                            url,
-                            summary: analysisResult.summary,
-                            themes: extractedThemes ?? [],
-                            verdict: analysisResult.verdict,
-                            sourceType: sourceType || 'article',
-                        }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
-                        retainGraphitiArticle({
-                            userId,
-                            url,
-                            summary: analysisResult.summary,
-                            themes: extractedThemes ?? [],
-                            verdict: analysisResult.verdict,
-                            sourceType: sourceType || 'article',
-                        }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
-                    } else {
-                        console.log(`⏭️ [Retain Validator] Skipping Hindsight/Graphiti for ${url.substring(0, 50)}...: ${validation.reason}`);
-                    }
-                }
-                } else {
-                    // Fallback: если summary слишком короткий, используем summary + reasoning (но это не идеально)
-                    const textForEmbedding = [
-                        analysisResult.summary || '',
-                        analysisResult.reasoning || '',
-                        url
-                    ].filter(Boolean).join(' ').trim();
-                    
-                    if (textForEmbedding.length > 10) {
-                        try {
-                            await generateAndSaveEmbedding(textForEmbedding, analysisHistoryId);
-                            console.log(`⚠️ Generated and saved embedding for ID ${analysisHistoryId} (using summary+reasoning fallback - not ideal)`);
-                        } catch (embeddingError: any) {
-                            console.warn(`⚠️ Failed to generate/save embedding for ID ${analysisHistoryId}: ${embeddingError.message}`);
-                        }
-                    }
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ Failed to save URL analysis to history: ${error.message}`);
-            }
-        }
-
-        // Этап 7: Формирование выводов (завершаем до return, чтобы job не помечался completed раньше времени)
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 7 });
-                startStageTracking(jobId, 7);
-            }
-            // Завершаем этап 7 синхронно, чтобы статус "completed" выставлялся только после записи статистики
-            await endStageTracking(jobId, 7, statsItemType);
-        }
-        
-        return {
-            originalUrl: url,
-            sourceType,
-            ...analysisResult,
-            relevanceLevel: relevanceLevelResult,
-            semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
-            extractedThemes: extractedThemes?.length ? extractedThemes : undefined, // Темы/смыслы из контента (для read и unread)
-            analysisHistoryId, // Добавляем ID записи в истории
-            extractedContent: content, // Полный контент для Q&A после анализа
-            error: false
-        };
     } catch (error: any) {
         console.error(`[Analysis Controller] Failed to process URL ${url}: ${error.message}`);
         
