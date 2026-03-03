@@ -16,6 +16,7 @@ import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from
 import { retainArticle } from '../services/hindsight.service';
 import { retainArticle as retainGraphitiArticle } from '../services/graphiti.service';
 import { validateBeforeRetain } from '../services/retain-validator.service';
+import { runFullAnalysisPipeline } from '../services/analysis-pipeline.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { addAnalysisJob } from '../services/analysis-queue.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
@@ -199,321 +200,39 @@ const processTextAnalysis = async (
     itemIndex?: number
 ) => {
     try {
-        // Этап 0: Загрузка текста
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 0 });
-                startStageTracking(jobId, 0);
-            }
-        }
-
-        if (!text || text.trim().length < 20) {
-            throw new Error('Текст слишком короткий для анализа. Минимум 20 символов.');
-        }
-        
-        // Завершаем этап 0
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            await endStageTracking(jobId, 0, itemType);
-        }
-
-        // Этап 1: AI-анализ
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 1 });
-                startStageTracking(jobId, 1);
-            }
-        }
-
-        const analysisResult = await analyzeContentWithAI(text, interests, feedbackHistory, undefined, userId, 'article');
-        
-        // Завершаем этап 1
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            await endStageTracking(jobId, 1, itemType);
-        }
-        
-        // Обработка семантических тегов в зависимости от режима
-        let semanticComparisonResult = null;
-        let extractedThemes: string[] = [];
-        
-        if (userId) {
-            try {
-                if (IS_DEBUG) {
-                    console.log(`🎯 [Semantic Tags] Extracting themes from text for user ${userId} (mode: ${mode})...`);
-                }
-                
-                // Этап 2: Извлечение тем
-                if (jobId && itemIndex != null) {
-                    const job = analysisJobs.get(jobId);
-                    const itemType = job?.itemType || 'text';
-                    if (job) {
-                        analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 2 });
-                        startStageTracking(jobId, 2);
-                    }
-                }
-                
-                const themes = await extractThemes(text);
-                
-                // Завершаем этап 2
-                if (jobId && itemIndex != null) {
-                    const job = analysisJobs.get(jobId);
-                    const itemType = job?.itemType || 'text';
-                    await endStageTracking(jobId, 2, itemType);
-                }
-                
-                if (themes.length > 0) {
-                    if (IS_DEBUG) {
-                        console.log(`📌 Extracted ${themes.length} themes:`, themes);
-                    }
-                    extractedThemes = themes; // Сохраняем для возврата в результате
-                    
-                    if (mode === 'read') {
-                        // Режим 'read': сохраняем теги в "облако смыслов" пользователя
-                        await saveUserSemanticTags(userId, themes);
-                        // Очищаем кэш после сохранения новых тегов
-                        clearUserTagsCache(userId);
-                        console.log(`✅ [Mode: read] Saved ${themes.length} semantic tags to database`);
-                    } else if (mode === 'unread') {
-                        // Режим 'unread': сравниваем темы статьи с тегами пользователя (с кэшированием)
-                        // Этап 4: Семантическое сравнение (для текста)
-                        if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'text';
-                            if (job) {
-                                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
-                                startStageTracking(jobId, 4);
-                            }
-                        }
-                        
-                        const userTagsWithWeights = await getUserTagsCached(userId);
-                        
-                        semanticComparisonResult = await compareThemes(themes, userTagsWithWeights, userId);
-                        
-                        // Завершаем этап 4
-                        if (jobId && itemIndex != null) {
-                            const job = analysisJobs.get(jobId);
-                            const itemType = job?.itemType || 'text';
-                            await endStageTracking(jobId, 4, itemType);
-                        }
-                        
-                        console.log(`📊 [Mode: unread] Comparison result: ${semanticComparisonResult.matchPercentage}% match, ${semanticComparisonResult.matchedThemes.length} themes matched`);
-                        
-                        if (semanticComparisonResult.hasNoTags) {
-                            console.log(`ℹ️ [Mode: unread] User ${userId} has no tags yet - suggesting to use 'read' mode first`);
-                            // Добавляем стандартное сообщение для случая без тегов
-                            semanticComparisonResult = {
-                                ...semanticComparisonResult,
-                                semanticVerdict: 'У вас пока нет тегов в "облако смыслов". Проанализируйте несколько статей в режиме "Я это прочитал и понравилось", чтобы начать формировать облако смыслов и получать персонализированные рекомендации.'
-                            };
-                        } else {
-                            // Генерируем AI-рекомендацию на основе сравнения тегов
-                            try {
-                                const semanticVerdict = await generateSemanticRecommendation(
-                                    themes,
-                                    userTagsWithWeights,
-                                    semanticComparisonResult,
-                                    text, // Передаем текст статьи для RAG
-                                    userId // Передаем userId для RAG
-                                );
-                                // Добавляем рекомендацию в результат сравнения
-                                semanticComparisonResult = {
-                                    ...semanticComparisonResult,
-                                    semanticVerdict
-                                };
-                                console.log(`💡 [Mode: unread] Generated semantic recommendation (${semanticVerdict.length} chars)`);
-                            } catch (error: any) {
-                                console.error(`❌ [Mode: unread] Failed to generate semantic recommendation: ${error.message}`);
-                                console.error(`❌ [Mode: unread] Error stack:`, error.stack);
-                                // Добавляем fallback рекомендацию на основе процента совпадения
-                                let fallbackVerdict = '';
-                                if (semanticComparisonResult.matchPercentage >= 70) {
-                                    fallbackVerdict = `Эта статья хорошо соответствует вашим интересам (${semanticComparisonResult.matchPercentage}% совпадение тем). Рекомендуется к прочтению.`;
-                                } else if (semanticComparisonResult.matchPercentage >= 40) {
-                                    fallbackVerdict = `Статья частично соответствует вашим интересам (${semanticComparisonResult.matchPercentage}% совпадение). Может быть интересна для расширения кругозора.`;
-                                } else {
-                                    fallbackVerdict = `Статья имеет низкое совпадение с вашими интересами (${semanticComparisonResult.matchPercentage}%). Возможно, стоит поискать более релевантный контент.`;
-                                }
-                                semanticComparisonResult = {
-                                    ...semanticComparisonResult,
-                                    semanticVerdict: fallbackVerdict
-                                };
-                            }
+        const result = await runFullAnalysisPipeline(
+            { type: 'text', text },
+            {
+                interests,
+                userId,
+                mode,
+                feedbackHistory,
+                skipHistorySave: false,
+                jobId,
+                itemIndex,
+                statsItemType: 'text',
+                onStageStart: (stageId) => {
+                    if (jobId && itemIndex != null) {
+                        const job = analysisJobs.get(jobId);
+                        if (job) {
+                            analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: stageId });
+                            startStageTracking(jobId, stageId);
                         }
                     }
-                } else {
-                    console.log(`ℹ️ No themes extracted from text`);
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ Failed to extract/process semantic tags: ${error.message}`);
-                // Не прерываем основной анализ, если извлечение тегов не удалось
-            }
-        }
-        
-        // Анализ уровня релевантности (аналогично processSingleUrlAnalysis)
-        let relevanceLevelResult = null;
-        if (userId) {
-            try {
-                console.log(`📊 [Relevance Level] Starting automatic relevance level analysis for user ${userId}...`);
-                const interestsList = interests.split(',').map((i: string) => i.trim().toLowerCase());
-                
-                const userLevelsRecords = await UserInterestLevel.findAll({
-                    where: {
-                        userId,
-                        interest: interestsList,
-                    },
-                });
-
-                const userLevels = userLevelsRecords.map(ul => ({
-                    interest: ul.interest,
-                    level: ul.level,
-                }));
-
-                if (userLevels.length > 0) {
-                    const interestsList = interests.split(',').map((i: string) => i.trim());
-                    const interestsWithLevels = interestsList
-                        .map(interest => {
-                            const userLevel = userLevels.find(ul => ul.interest.toLowerCase() === interest.toLowerCase());
-                            return userLevel ? { interest, userLevel: userLevel.level } : null;
-                        })
-                        .filter((item): item is { interest: string; userLevel: 'novice' | 'amateur' | 'professional' } => item !== null);
-
-                    if (interestsWithLevels.length > 0) {
-                        try {
-                            const { analyzeRelevanceLevelForMultipleInterests } = await import('../services/relevance-level.service');
-                            const relevanceResults = await Promise.race([
-                                analyzeRelevanceLevelForMultipleInterests(text, interestsWithLevels),
-                                new Promise<never>((_, reject) => 
-                                    setTimeout(() => reject(new Error('Relevance level analysis timeout')), 30000)
-                                )
-                            ]);
-                            
-                            if (relevanceResults.length > 0) {
-                                relevanceLevelResult = relevanceResults[0].result;
-                                if (relevanceResults.length > 1) {
-                                    const avgScore = Math.round(relevanceResults.reduce((sum, r) => sum + r.result.relevanceScore, 0) / relevanceResults.length);
-                                    relevanceLevelResult = {
-                                        ...relevanceLevelResult,
-                                        relevanceScore: avgScore,
-                                        explanation: `Анализ для интересов: ${relevanceResults.map(r => r.interest).join(', ')}. ${relevanceLevelResult.explanation}`,
-                                    };
-                                }
-                            }
-                        } catch (error: any) {
-                            console.warn(`⚠️ Failed to analyze relevance level: ${error.message}`);
-                        }
+                },
+                onStageEnd: async (stageId, itemType) => {
+                    if (jobId && itemIndex != null) {
+                        await endStageTracking(jobId, stageId, itemType as 'article' | 'video' | 'urls' | 'text');
                     }
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ [Relevance Level] Failed to analyze relevance level: ${error.message}`);
+                },
             }
+        );
+
+        if (result.error) {
+            throw new Error(result.message || 'Текст слишком короткий для анализа.');
         }
 
-        // Сохраняем в историю, если пользователь авторизован
-        let analysisHistoryId: number | undefined;
-        if (userId) {
-            try {
-                const historyRecord = await AnalysisHistory.create({
-                    userId,
-                    url: `text://${text.substring(0, 100)}...`, // Специальный формат для текста
-                    interests,
-                    sourceType: 'text',
-                    score: analysisResult.score,
-                    verdict: analysisResult.verdict,
-                    summary: analysisResult.summary,
-                    reasoning: analysisResult.reasoning,
-                    originalText: text, // Сохраняем оригинальный текст
-                    extractedThemes: extractedThemes?.length ? JSON.stringify(extractedThemes) : null,
-                });
-                analysisHistoryId = historyRecord.id;
-                console.log(`💾 Saved text analysis to history (ID: ${analysisHistoryId})`);
-                
-                // Генерируем и сохраняем эмбеддинг для векторного поиска
-                // ИСПРАВЛЕНИЕ: Используем только summary + URL для единообразия с поиском
-                // Это обеспечит точное соответствие эмбеддингов при сохранении и поиске
-                if (analysisResult.summary && analysisResult.summary.length > 50) {
-                    try {
-                        // Используем только summary + URL для единообразия с поиском
-                        const url = `text://${text.substring(0, 100)}...`;
-                        const textForEmbedding = [
-                            analysisResult.summary,
-                            url
-                        ].filter(Boolean).join('\n\n').trim();
-                        
-                        await generateAndSaveEmbedding(textForEmbedding, analysisHistoryId);
-                        console.log(`✅ Generated and saved embedding for analysis_history ID: ${analysisHistoryId} (using summary + URL: ${textForEmbedding.length} chars)`);
-                    } catch (embeddingError: any) {
-                        console.warn(`⚠️ Failed to generate/save embedding: ${embeddingError.message}`);
-                        // Не прерываем основной процесс, если эмбеддинг не удалось сохранить
-                    }
-                }
-                // Hindsight + Graphiti: сохраняем в память агента (опционально, после валидации)
-                if (userId && analysisResult?.summary) {
-                    const validation = validateBeforeRetain(analysisResult.summary, extractedThemes ?? [], text);
-                    if (validation.valid) {
-                        if (IS_DEBUG) console.log(`✅ [Retain Validator] Passed, saving to Hindsight/Graphiti (text)`);
-                        retainArticle({
-                            userId,
-                            url: `text://${text.substring(0, 100)}...`,
-                            summary: analysisResult.summary,
-                            themes: extractedThemes ?? [],
-                            verdict: analysisResult.verdict,
-                            sourceType: 'text',
-                        }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
-                        retainGraphitiArticle({
-                            userId,
-                            url: `text://${text.substring(0, 100)}...`,
-                            summary: analysisResult.summary,
-                            themes: extractedThemes ?? [],
-                            verdict: analysisResult.verdict,
-                            sourceType: 'text',
-                        }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
-                    } else {
-                        console.log(`⏭️ [Retain Validator] Skipping Hindsight/Graphiti for text: ${validation.reason}`);
-                    }
-                }
-            } catch (error: any) {
-                console.warn(`⚠️ Failed to save text analysis to history: ${error.message}`);
-            }
-        }
-
-        // Этап 4: Формирование выводов (для текста)
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            if (job) {
-                analysisJobs.set(jobId, { ...job, currentItemIndex: itemIndex, currentStage: 4 });
-                startStageTracking(jobId, 4);
-            }
-        }
-        
-        // Завершаем этап 4
-        if (jobId && itemIndex != null) {
-            const job = analysisJobs.get(jobId);
-            const itemType = job?.itemType || 'text';
-            setTimeout(async () => {
-                await endStageTracking(jobId, 4, itemType);
-            }, 100);
-        }
-        
-        return {
-            originalUrl: `text://${text.substring(0, 50)}...`,
-            url: `text://${text.substring(0, 50)}...`,
-            sourceType: 'text',
-            ...analysisResult,
-            relevanceLevel: relevanceLevelResult,
-            semanticComparison: semanticComparisonResult, // Добавляем результат сравнения тегов для режима 'unread'
-            extractedThemes: extractedThemes?.length ? extractedThemes : undefined, // Темы/смыслы из контента (для read и unread)
-            analysisHistoryId,
-            extractedContent: text, // Полный текст для Q&A после анализа
-            error: false
-        };
+        return result;
     } catch (error: any) {
         console.error(`[Analysis Controller] Failed to process text: ${error.message}`);
         return {
