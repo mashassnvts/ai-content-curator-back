@@ -15,6 +15,7 @@ import { extractThemes, saveUserSemanticTags, compareThemes, clearUserTagsCache,
 import { generateAndSaveEmbedding, findSimilarArticles, generateEmbedding } from '../services/embedding.service';
 import { retainArticle } from '../services/hindsight.service';
 import { retainArticle as retainGraphitiArticle } from '../services/graphiti.service';
+import { validateBeforeRetain } from '../services/retain-validator.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { addAnalysisJob } from '../services/analysis-queue.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
@@ -452,24 +453,30 @@ const processTextAnalysis = async (
                         // Не прерываем основной процесс, если эмбеддинг не удалось сохранить
                     }
                 }
-                // Hindsight + Graphiti: сохраняем в память агента (опционально)
+                // Hindsight + Graphiti: сохраняем в память агента (опционально, после валидации)
                 if (userId && analysisResult?.summary) {
-                    retainArticle({
-                        userId,
-                        url: `text://${text.substring(0, 100)}...`,
-                        summary: analysisResult.summary,
-                        themes: extractedThemes ?? [],
-                        verdict: analysisResult.verdict,
-                        sourceType: 'text',
-                    }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
-                    retainGraphitiArticle({
-                        userId,
-                        url: `text://${text.substring(0, 100)}...`,
-                        summary: analysisResult.summary,
-                        themes: extractedThemes ?? [],
-                        verdict: analysisResult.verdict,
-                        sourceType: 'text',
-                    }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
+                    const validation = validateBeforeRetain(analysisResult.summary, extractedThemes ?? [], text);
+                    if (validation.valid) {
+                        if (IS_DEBUG) console.log(`✅ [Retain Validator] Passed, saving to Hindsight/Graphiti (text)`);
+                        retainArticle({
+                            userId,
+                            url: `text://${text.substring(0, 100)}...`,
+                            summary: analysisResult.summary,
+                            themes: extractedThemes ?? [],
+                            verdict: analysisResult.verdict,
+                            sourceType: 'text',
+                        }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
+                        retainGraphitiArticle({
+                            userId,
+                            url: `text://${text.substring(0, 100)}...`,
+                            summary: analysisResult.summary,
+                            themes: extractedThemes ?? [],
+                            verdict: analysisResult.verdict,
+                            sourceType: 'text',
+                        }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
+                    } else {
+                        console.log(`⏭️ [Retain Validator] Skipping Hindsight/Graphiti for text: ${validation.reason}`);
+                    }
                 }
             } catch (error: any) {
                 console.warn(`⚠️ Failed to save text analysis to history: ${error.message}`);
@@ -1100,24 +1107,30 @@ export const processSingleUrlAnalysis = async (
                         console.warn(`⚠️ Failed to generate/save embedding for ID ${analysisHistoryId}: ${embeddingError.message}`);
                         // Не прерываем основной процесс
                     }
-                // Hindsight + Graphiti: сохраняем в память агента (опционально)
+                // Hindsight + Graphiti: сохраняем в память агента (опционально, после валидации)
                 if (userId && analysisResult?.summary) {
-                    retainArticle({
-                        userId,
-                        url,
-                        summary: analysisResult.summary,
-                        themes: extractedThemes ?? [],
-                        verdict: analysisResult.verdict,
-                        sourceType: sourceType || 'article',
-                    }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
-                    retainGraphitiArticle({
-                        userId,
-                        url,
-                        summary: analysisResult.summary,
-                        themes: extractedThemes ?? [],
-                        verdict: analysisResult.verdict,
-                        sourceType: sourceType || 'article',
-                    }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
+                    const validation = validateBeforeRetain(analysisResult.summary, extractedThemes ?? [], content);
+                    if (validation.valid) {
+                        if (IS_DEBUG) console.log(`✅ [Retain Validator] Passed, saving to Hindsight/Graphiti (${url.substring(0, 50)}...)`);
+                        retainArticle({
+                            userId,
+                            url,
+                            summary: analysisResult.summary,
+                            themes: extractedThemes ?? [],
+                            verdict: analysisResult.verdict,
+                            sourceType: sourceType || 'article',
+                        }).catch((e: any) => console.warn(`⚠️ Hindsight retain: ${e.message}`));
+                        retainGraphitiArticle({
+                            userId,
+                            url,
+                            summary: analysisResult.summary,
+                            themes: extractedThemes ?? [],
+                            verdict: analysisResult.verdict,
+                            sourceType: sourceType || 'article',
+                        }).catch((e: any) => console.warn(`⚠️ Graphiti retain: ${e.message}`));
+                    } else {
+                        console.log(`⏭️ [Retain Validator] Skipping Hindsight/Graphiti for ${url.substring(0, 50)}...: ${validation.reason}`);
+                    }
                 }
                 } else {
                     // Fallback: если summary слишком короткий, используем summary + reasoning (но это не идеально)
