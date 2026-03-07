@@ -176,8 +176,11 @@ export async function traceGeneration<T>(
                     } catch (_) {
                         /* ignore */
                     }
+                    throw err;
+                } else {
+                    console.warn('[Observability] MLflow logging failed (running without trace):', err instanceof Error ? err.message : String(err));
+                    return fn();
                 }
-                throw err;
             }
         }
     }
@@ -258,8 +261,11 @@ export async function traceSpan<T>(
                     } catch (_) {
                         /* ignore */
                     }
+                    throw err;
+                } else {
+                    console.warn('[Observability] MLflow logging failed (running without trace):', err instanceof Error ? err.message : String(err));
+                    return fn();
                 }
-                throw err;
             }
         }
     }
