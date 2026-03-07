@@ -10,7 +10,10 @@
 import axios, { AxiosInstance } from 'axios';
 
 function normalizeTrackingUri(uri: string): string {
-    return uri.trim().replace(/\/+$/, '');
+    const s = uri.trim().replace(/\/+$/, '');
+    if (!s) return 'http://localhost:5000';
+    if (/^https?:\/\//i.test(s)) return s;
+    return `https://${s}`;
 }
 
 const TRACKING_URI = normalizeTrackingUri(process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000');
