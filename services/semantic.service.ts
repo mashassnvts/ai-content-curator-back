@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import UserSemanticTag from '../models/UserSemanticTag';
+import { traceGeneration } from '../observability/langfuse-helpers';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
 import { recallForUser } from './hindsight.service';
 import { searchForUser } from './graphiti.service';
@@ -283,11 +284,16 @@ ${processedText}
             setTimeout(() => reject(new Error('Request timed out.')), 60000)
         );
         
-        const completionPromise = apiRequestQueue.add(() => 
-            genAI.models.generateContent({
-                model: aiModel,
-                contents: `${systemInstruction}\n\n${userPrompt}`,
-            })
+        const completionPromise = traceGeneration(
+            'semantic-extractThemes',
+            aiModel,
+            userPrompt.slice(0, 3000),
+            () => apiRequestQueue.add(() =>
+                genAI.models.generateContent({
+                    model: aiModel,
+                    contents: `${systemInstruction}\n\n${userPrompt}`,
+                })
+            )
         );
         
         const result = await Promise.race([completionPromise, timeoutPromise]) as any;
@@ -793,11 +799,16 @@ export async function analyzeCommentSentiment(comment: string): Promise<{ sentim
         // Используем ту же модель, что и в других местах (или из env)
         const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
         
-        const result = await apiRequestQueue.add(() => 
-            genAI.models.generateContent({
-                model: aiModel,
-                contents: prompt,
-            })
+        const result = await traceGeneration(
+            'semantic-analyzeSentiment',
+            aiModel,
+            comment.slice(0, 500),
+            () => apiRequestQueue.add(() =>
+                genAI.models.generateContent({
+                    model: aiModel,
+                    contents: prompt,
+                })
+            )
         ) as any;
 
         // Извлекаем текст ответа (как в других местах кода)
@@ -1281,18 +1292,23 @@ ${topUserTags}
             setTimeout(() => reject(new Error('Request timed out.')), 30000) // 30 секунд для рекомендации
         );
         
-        const completionPromise = apiRequestQueue.add(async () => {
-            try {
-                const response = await genAI.models.generateContent({
-                    model: aiModel,
-                    contents: `${systemInstruction}\n\n${userPrompt}`,
-                });
-                return response;
-            } catch (apiError: any) {
-                console.error(`❌ [generateSemanticRecommendation] API call failed: ${apiError.message}`);
-                throw apiError;
-            }
-        });
+        const completionPromise = traceGeneration(
+            'semantic-generateRecommendation',
+            aiModel,
+            userPrompt.slice(0, 2000),
+            () => apiRequestQueue.add(async () => {
+                try {
+                    const response = await genAI.models.generateContent({
+                        model: aiModel,
+                        contents: `${systemInstruction}\n\n${userPrompt}`,
+                    });
+                    return response;
+                } catch (apiError: any) {
+                    console.error(`❌ [generateSemanticRecommendation] API call failed: ${apiError.message}`);
+                    throw apiError;
+                }
+            })
+        );
         
         const result = await Promise.race([completionPromise, timeoutPromise]) as any;
 

@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import sequelize from '../config/database';
+import { traceSpan } from '../observability/langfuse-helpers';
 import { QueryTypes } from 'sequelize';
 
 const apiKey = process.env.GEMINI_API_KEY;
@@ -89,34 +90,34 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         // Используем Gemini Embedding API
         // Модель: gemini-embedding-001 (размерность по умолчанию: 3072, можно уменьшить до 768)
         const embeddingResponse = await Promise.race([
-            apiRequestQueue.add(async () => {
-                try {
-                    // Используем правильный формат для Gemini Embedding API
-                    // Согласно документации: contents может быть строкой или массивом строк
-                    // Пробуем сначала простой формат без дополнительных параметров
-                    let result: any;
+            traceSpan(
+                'embedding-gemini',
+                () => apiRequestQueue.add(async () => {
                     try {
-                        result = await genAI.models.embedContent({
-                            model: 'gemini-embedding-001',
-                            contents: text
-                        });
-                    } catch (simpleError: any) {
-                        // Если простой формат не работает, пробуем с массивом
-                        if (IS_DEBUG) {
-                            console.log(`⚠️ [generateEmbedding] Simple format failed, trying array: ${simpleError.message}`);
+                        let result: any;
+                        try {
+                            result = await genAI.models.embedContent({
+                                model: 'gemini-embedding-001',
+                                contents: text
+                            });
+                        } catch (simpleError: any) {
+                            if (IS_DEBUG) {
+                                console.log(`⚠️ [generateEmbedding] Simple format failed, trying array: ${simpleError.message}`);
+                            }
+                            result = await genAI.models.embedContent({
+                                model: 'gemini-embedding-001',
+                                contents: text
+                            });
                         }
-                        result = await genAI.models.embedContent({
-                            model: 'gemini-embedding-001',
-                            contents: text
-                        });
+                        return result;
+                    } catch (apiError: any) {
+                        console.error(`❌ [generateEmbedding] API call failed: ${apiError.message}`);
+                        console.error(`❌ [generateEmbedding] Error details:`, apiError);
+                        throw apiError;
                     }
-                    return result;
-                } catch (apiError: any) {
-                    console.error(`❌ [generateEmbedding] API call failed: ${apiError.message}`);
-                    console.error(`❌ [generateEmbedding] Error details:`, apiError);
-                    throw apiError;
-                }
-            }),
+                }),
+                { model: 'gemini-embedding-001', inputLength: text.length }
+            ),
             timeoutPromise
         ]) as any;
 
