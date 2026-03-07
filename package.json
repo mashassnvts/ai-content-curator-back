@@ -9,7 +9,7 @@
     "clean": "rimraf dist",
     "build": "npm run clean && tsc",
     "postinstall": "node -e \"if (process.env.INSTALL_CHROME !== 'false') { console.log('🔧 Installing Chrome for Puppeteer...'); try { require('child_process').execSync('npx puppeteer browsers install chrome', {stdio: 'inherit', cwd: process.cwd()}); console.log('✓ Chrome installation completed'); } catch(e) { console.log('⚠️ Chrome installation skipped or failed:', e.message); console.log('   Chrome will be downloaded on first use if needed'); } } else { console.log('⏭️ Chrome installation skipped (INSTALL_CHROME=false)'); }\"",
-    "dev": "ts-node-dev --respawn --transpile-only server.ts",
+    "dev": "npx ts-node-dev --respawn --transpile-only server.ts",
     "bot": "ts-node-dev --respawn --transpile-only bot-runner.ts",
     "bot:dev": "ts-node bot-runner.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -19,6 +19,9 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@langfuse/otel": "^4.0.0",
+    "@langfuse/tracing": "^4.0.0",
+    "@opentelemetry/sdk-node": "^0.213.0",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
@@ -56,7 +59,8 @@
     "youtube-transcript": "^1.2.1",
     "yt-dlp-exec": "^1.0.2",
     "ytdl-core": "^4.11.5",
-    "ytpl": "^2.3.0"
+    "ytpl": "^2.3.0",
+    "openlit": "^1.10.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",

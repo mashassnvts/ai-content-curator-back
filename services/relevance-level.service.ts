@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import { traceGeneration } from '../observability/langfuse-helpers';
 
 const apiKey = process.env.GEMINI_API_KEY;
 
@@ -91,12 +92,16 @@ async function generateCompletionWithRetry(
             
             const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${userPrompt}` : userPrompt;
             
-            // Используем очередь для предотвращения rate limiting
-            const completionPromise = apiRequestQueue.add(() => 
-                genAI.models.generateContent({
-                    model: modelName,
-                    contents: fullPrompt,
-                })
+            const completionPromise = traceGeneration(
+                'relevance-level-analyze',
+                modelName,
+                fullPrompt.slice(0, 3000),
+                () => apiRequestQueue.add(() =>
+                    genAI.models.generateContent({
+                        model: modelName,
+                        contents: fullPrompt,
+                    })
+                )
             );
             
             const completion = await Promise.race([completionPromise, timeoutPromise]) as any;
