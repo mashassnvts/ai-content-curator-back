@@ -4,13 +4,13 @@
  * Оба могут отправлять трейсы в Langfuse (Cloud или self-hosted).
  */
 
-const tool = process.env.OBSERVABILITY_TOOL?.toLowerCase();
+const tool = process.env.OBSERVABILITY_TOOL?.toLowerCase().trim();
 const enabled = process.env.OBSERVABILITY_ENABLED === 'true' || process.env.OBSERVABILITY_ENABLED === '1';
 
+console.log('[Observability] OBSERVABILITY_ENABLED=', process.env.OBSERVABILITY_ENABLED, 'OBSERVABILITY_TOOL=', process.env.OBSERVABILITY_TOOL ?? '(not set)');
+
 if (!enabled || !tool) {
-    if (process.env.LOG_LEVEL === 'debug') {
-        console.log('[Observability] Disabled. Set OBSERVABILITY_ENABLED=true and OBSERVABILITY_TOOL=langfuse|openlit');
-    }
+    console.log('[Observability] Disabled or missing tool. Set OBSERVABILITY_ENABLED=true and OBSERVABILITY_TOOL=langfuse or openlit');
 } else if (tool === 'langfuse') {
     try {
         require('./langfuse');
@@ -20,7 +20,12 @@ if (!enabled || !tool) {
         console.warn('[Observability] Langfuse init failed:', msg, '— Run: npm install @langfuse/otel @langfuse/tracing @opentelemetry/sdk-node');
     }
 } else if (tool === 'openlit') {
-    try { require('./openlit'); } catch (e) { console.warn('[Observability] OpenLIT init failed. Run: npm install openlit'); }
+    try {
+        require('./openlit');
+        console.log('[Observability] OpenLIT initialized. Traces will be sent to Langfuse.');
+    } catch (e) {
+        console.warn('[Observability] OpenLIT init failed. Run: npm install openlit');
+    }
 } else {
     console.warn(`[Observability] Unknown tool: ${tool}. Use 'langfuse' or 'openlit'.`);
 }
