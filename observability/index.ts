@@ -27,7 +27,9 @@ if (!enabled || !tool) {
         console.warn('[Observability] OpenLIT init failed. Run: npm install openlit');
     }
 } else if (tool === 'mlflow') {
-    console.log('[Observability] MLflow enabled. Runs will be logged to', process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000');
+    const raw = (process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000').trim().replace(/\/+$/, '');
+    const displayUri = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    console.log('[Observability] MLflow enabled. Runs will be logged to', displayUri);
 } else {
     console.warn(`[Observability] Unknown tool: ${tool}. Use 'langfuse', 'openlit' or 'mlflow'.`);
 }
