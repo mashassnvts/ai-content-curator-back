@@ -17,17 +17,29 @@ const secretKey = process.env.LANGFUSE_SECRET_KEY;
 const baseUrl = process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com';
 
 let otlpEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-let otlpHeaders = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+let otlpHeaders: Record<string, string> | undefined;
+
+const headersEnv = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+if (headersEnv && typeof headersEnv === 'string') {
+    const parsed: Record<string, string> = {};
+    headersEnv.split(',').forEach((part) => {
+        const idx = part.indexOf('=');
+        if (idx > 0) parsed[part.slice(0, idx).trim()] = part.slice(idx + 1).trim();
+    });
+    otlpHeaders = Object.keys(parsed).length ? parsed : undefined;
+} else {
+    otlpHeaders = undefined;
+}
 
 if (!otlpEndpoint && publicKey && secretKey) {
     otlpEndpoint = `${baseUrl.replace(/\/$/, '')}/api/public/otel`;
     const auth = Buffer.from(`${publicKey}:${secretKey}`).toString('base64');
-    otlpHeaders = `Authorization=Basic ${auth}`;
+    otlpHeaders = { Authorization: `Basic ${auth}` };
 }
 
 Openlit.init({
     otlpEndpoint: otlpEndpoint || undefined,
-    otlpHeaders: otlpHeaders || undefined,
+    otlpHeaders,
     disableBatch: true,
     applicationName: process.env.OTEL_SERVICE_NAME || 'ai-content-curator',
     environment: process.env.OTEL_DEPLOYMENT_ENVIRONMENT || 'development',
