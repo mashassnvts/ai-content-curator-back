@@ -23,8 +23,6 @@ function getRedis(): Redis | null {
     }
 }
 
-const memoryStore = new Map<string, Record<string, any>>();
-
 export interface AnalysisJobState {
     status: 'pending' | 'in_progress' | 'completed' | 'error';
     results?: any[];
@@ -37,6 +35,8 @@ export interface AnalysisJobState {
     channelProgress?: number;
     [key: string]: any;
 }
+
+const memoryStore = new Map<string, AnalysisJobState>();
 
 export function setAnalysisJob(jobId: string, state: AnalysisJobState): void {
     memoryStore.set(jobId, state);
