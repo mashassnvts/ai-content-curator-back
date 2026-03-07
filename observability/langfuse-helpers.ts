@@ -6,8 +6,11 @@
 let startActiveObservation: typeof import('@langfuse/tracing')['startActiveObservation'] | null = null;
 try {
     startActiveObservation = require('@langfuse/tracing').startActiveObservation;
-} catch {
+} catch (e) {
     // Пакеты не установлены — observability отключена
+    if (process.env.OBSERVABILITY_ENABLED === 'true') {
+        console.warn('[Observability] @langfuse/tracing not installed. Run: npm install @langfuse/otel @langfuse/tracing @opentelemetry/sdk-node');
+    }
 }
 
 const useLangfuse = () =>
