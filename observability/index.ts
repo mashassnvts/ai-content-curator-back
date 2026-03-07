@@ -1,7 +1,7 @@
 /**
  * Observability module: Langfuse, OpenLIT, MLflow.
  * Переключение через OBSERVABILITY_TOOL=langfuse|openlit|mlflow
- * Langfuse и OpenLIT отправляют трейсы в Langfuse; MLflow — в MLflow Tracking Server.
+ * Все три отправляют трейсы в Langfuse (mlflow — через OTel, без MLflow Tracking Server).
  */
 
 const tool = process.env.OBSERVABILITY_TOOL?.toLowerCase().trim();
@@ -27,9 +27,17 @@ if (!enabled || !tool) {
         console.warn('[Observability] OpenLIT init failed. Run: npm install openlit');
     }
 } else if (tool === 'mlflow') {
-    const raw = (process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000').trim().replace(/\/+$/, '');
-    const displayUri = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-    console.log('[Observability] MLflow enabled. Runs will be logged to', displayUri);
+    const hasLangfuseKeys = !!(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY);
+    if (hasLangfuseKeys) {
+        try {
+            require('./langfuse');
+            console.log('[Observability] MLflow (via Langfuse): traces will be sent to', process.env.LANGFUSE_BASE_URL || 'https://cloud.langfuse.com');
+        } catch (e) {
+            console.warn('[Observability] Langfuse init for mlflow failed:', (e as Error)?.message ?? e);
+        }
+    } else {
+        console.warn('[Observability] OBSERVABILITY_TOOL=mlflow requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. Set them or use langfuse/openlit.');
+    }
 } else {
     console.warn(`[Observability] Unknown tool: ${tool}. Use 'langfuse', 'openlit' or 'mlflow'.`);
 }
