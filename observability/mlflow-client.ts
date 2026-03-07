@@ -9,8 +9,12 @@
 
 import axios, { AxiosInstance } from 'axios';
 
-const TRACKING_URI = (process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000').replace(/\/$/, '');
-const EXPERIMENT_NAME = process.env.MLFLOW_EXPERIMENT_NAME || 'ai-content-curator';
+function normalizeTrackingUri(uri: string): string {
+    return uri.trim().replace(/\/+$/, '');
+}
+
+const TRACKING_URI = normalizeTrackingUri(process.env.MLFLOW_TRACKING_URI || 'http://localhost:5000');
+const EXPERIMENT_NAME = (process.env.MLFLOW_EXPERIMENT_NAME || 'ai-content-curator').trim();
 
 const MAX_PARAM_VALUE = 6000; // MLflow limit for param value in bytes (UTF-8)
 
@@ -33,8 +37,9 @@ export class MlflowClient {
     private experimentId: string | null = null;
 
     constructor(trackingUri = TRACKING_URI) {
+        const base = normalizeTrackingUri(String(trackingUri));
         this.client = axios.create({
-            baseURL: `${trackingUri}/api/2.0/mlflow`,
+            baseURL: `${base}/api/2.0/mlflow`,
             headers: { 'Content-Type': 'application/json' },
             timeout: 10000,
         });
