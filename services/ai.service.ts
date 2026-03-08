@@ -325,7 +325,7 @@ ${feedbackContext}${ragContext}
    - Если контент релевантен ТЕКУЩИМ интересам, даже если был старый негативный feedback - ставь соответствующую оценку` : ''}`;
 
     
-    // Выбор модели через единый провайдер (Gemini или DeepSeek)
+    // Выбор модели через единый провайдер (Gemini, DeepSeek или OpenRouter)
     const provider = getProvider();
     const aiModel = getModelForRequest();
 
@@ -341,7 +341,7 @@ ${feedbackContext}${ragContext}
 }`;
 
     try {
-        const providerLabel = provider === 'deepseek' ? 'DeepSeek' : 'Google Gemini - FREE';
+        const providerLabel = provider === 'openrouter' ? 'OpenRouter' : provider === 'deepseek' ? 'DeepSeek' : 'Google Gemini - FREE';
         console.log(`🤖 Using AI model: ${aiModel} (${providerLabel})`);
         if (IS_DEBUG) {
             console.log(`📊 Content length: ${processedContent.length} chars (${Math.round(processedContent.length / 4)} estimated tokens)`);
@@ -691,12 +691,15 @@ ${feedbackContext}${ragContext}
         if (isApiKeyError) {
             console.error(`❌ API Key error: ${errorMessage}`);
             console.error('');
-            const providerName = getProvider() === 'deepseek' ? 'DeepSeek' : 'Google Gemini';
+            const providerName = getProvider() === 'openrouter' ? 'OpenRouter' : getProvider() === 'deepseek' ? 'DeepSeek' : 'Google Gemini';
             console.error(`💡 This project uses ${providerName} API.`);
             console.error('   The API key is missing or invalid.');
             console.error('');
             console.error('📝 To fix this:');
-            if (getProvider() === 'deepseek') {
+            if (getProvider() === 'openrouter') {
+                console.error('   1. Get your API key at: https://openrouter.ai/settings/keys');
+                console.error('   2. Add to your .env file: OPENROUTER_API_KEY=your_key_here');
+            } else if (getProvider() === 'deepseek') {
                 console.error('   1. Get your API key at: https://platform.deepseek.com');
                 console.error('   2. Add to your .env file: DEEPSEEK_API_KEY=your_key_here');
             } else {
@@ -705,16 +708,20 @@ ${feedbackContext}${ragContext}
             }
             console.error('   3. Make sure the API key is correct and not expired');
             console.error('   4. Restart your server');
-            throw new Error(`API ключ не найден или неверен. ${getProvider() === 'deepseek' ? 'Добавьте DEEPSEEK_API_KEY в .env' : 'Получите API ключ на https://aistudio.google.com/app/apikey и добавьте GEMINI_API_KEY в .env'}`);
+            const keyHint = getProvider() === 'openrouter' ? 'Добавьте OPENROUTER_API_KEY в .env' : getProvider() === 'deepseek' ? 'Добавьте DEEPSEEK_API_KEY в .env' : 'Получите API ключ на https://aistudio.google.com/app/apikey и добавьте GEMINI_API_KEY в .env';
+            throw new Error(`API ключ не найден или неверен. ${keyHint}`);
         }
         
         if (errorMessage.includes('404') || 
             (errorCode === 404) ||
             (errorCode === 400 && !isApiKeyError && (errorMessage.includes('not found') || errorMessage.includes('not a valid model') || errorMessage.includes('INVALID_ARGUMENT')))) {
-            const providerName = getProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
+            const providerName = getProvider() === 'openrouter' ? 'OpenRouter' : getProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
             console.error(`❌ Model "${aiModel}" is not available or has invalid name!`);
             console.error('');
-            if (getProvider() === 'deepseek') {
+            if (getProvider() === 'openrouter') {
+                console.error('   OpenRouter: use AI_MODEL e.g. openrouter/free or openrouter/google/gemini-2.0-flash-001');
+                console.error('   Set OPENROUTER_API_KEY in .env. Models: https://openrouter.ai/models');
+            } else if (getProvider() === 'deepseek') {
                 console.error('   DeepSeek models: deepseek-chat, deepseek-reasoner');
                 console.error('   Set AI_MODEL=deepseek-chat (or deepseek-reasoner) and DEEPSEEK_API_KEY in .env');
             } else {
@@ -724,7 +731,8 @@ ${feedbackContext}${ragContext}
                 console.error('   - gemini-pro (legacy, up to 32k tokens)');
                 console.error('   Set AI_MODEL=gemini-2.5-flash and GEMINI_API_KEY in .env');
             }
-            throw new Error(`Модель "${aiModel}" недоступна. ${getProvider() === 'deepseek' ? 'Используйте deepseek-chat. Задайте DEEPSEEK_API_KEY в .env' : 'Используйте gemini-2.5-flash или gemini-1.5-pro. Задайте GEMINI_API_KEY в .env'}`);
+            const modelHint = getProvider() === 'openrouter' ? 'Используйте openrouter/free или другую модель с openrouter.ai. Задайте OPENROUTER_API_KEY в .env' : getProvider() === 'deepseek' ? 'Используйте deepseek-chat. Задайте DEEPSEEK_API_KEY в .env' : 'Используйте gemini-2.5-flash или gemini-1.5-pro. Задайте GEMINI_API_KEY в .env';
+            throw new Error(`Модель "${aiModel}" недоступна. ${modelHint}`);
         }
         
         // Обработка ошибки перегрузки модели (503) - модель временно недоступна
@@ -740,8 +748,26 @@ ${feedbackContext}${ragContext}
             console.error('📝 Solution: Please try again in a few minutes.');
             throw new Error(`Модель Gemini временно перегружена. Система выполнила 3 попытки с задержками, но модель все еще недоступна. Пожалуйста, попробуйте повторить запрос через несколько минут.`);
         }
+
+        // 402 Payment Required — недостаточно средств или нужна оплата API
+        const status402 = error?.response?.status === 402 || errorCode === 402 || errorMessage.includes('402');
+        if (status402) {
+            const providerName = getProvider() === 'openrouter' ? 'OpenRouter' : getProvider() === 'deepseek' ? 'DeepSeek' : 'Google Gemini';
+            console.error(`❌ API returned 402 Payment Required. ${providerName} requires payment or account balance.`);
+            if (getProvider() === 'openrouter') {
+                console.error('   Top up at https://openrouter.ai/credits or use a free model (AI_MODEL=openrouter/free) and check limits.');
+            } else if (getProvider() === 'deepseek') {
+                console.error('   Top up balance at https://platform.deepseek.com or switch to Gemini (AI_PROVIDER=gemini) for free tier.');
+            }
+            const msg402 = getProvider() === 'openrouter'
+                ? 'OpenRouter API вернул 402: пополните баланс на openrouter.ai/credits или используйте бесплатную модель (openrouter/free).'
+                : getProvider() === 'deepseek'
+                    ? 'DeepSeek API вернул 402: требуется пополнение баланса. Пополните счёт на platform.deepseek.com или переключитесь на Gemini (AI_PROVIDER=gemini) для бесплатного тарифа.'
+                    : 'API вернул 402 (требуется оплата). Пополните баланс или проверьте лимиты на aistudio.google.com.';
+            throw new Error(msg402);
+        }
         
-        // Обработка ошибки rate limit (слишком много запросов в минуту)
+        // Обработка ошибки rate limit
         if (error.message && (error.message.includes('429') || error.message.includes('RESOURCE_EXHAUSTED') || error.message.includes('quota') || error.message.includes('rate limit') || error.message.includes('RATE_LIMIT_EXCEEDED'))) {
             const isQuotaExceeded = error.message.includes('quota') || error.message.includes('QUOTA_EXCEEDED');
             const isRateLimit = error.message.includes('429') || error.message.includes('rate limit') || error.message.includes('RATE_LIMIT_EXCEEDED');

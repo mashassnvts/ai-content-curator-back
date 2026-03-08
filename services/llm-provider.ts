@@ -1,18 +1,18 @@
 /**
- * Единый провайдер LLM: Gemini или DeepSeek.
- * Переключение: AI_PROVIDER=gemini | deepseek
- * Ключи: GEMINI_API_KEY (для gemini), DEEPSEEK_API_KEY (для deepseek)
- * Модель: AI_MODEL (gemini-2.5-flash / deepseek-chat по умолчанию)
+ * Единый провайдер LLM: Gemini, DeepSeek или OpenRouter.
+ * Переключение: AI_PROVIDER=gemini | deepseek | openrouter
+ * Ключи: GEMINI_API_KEY, DEEPSEEK_API_KEY, OPENROUTER_API_KEY
+ * Модель: AI_MODEL (для openrouter по умолчанию openrouter/free — бесплатные модели).
  *
  * Эмбеддинги остаются на Gemini (embedding.service.ts).
  */
 
 import axios from 'axios';
 
-export type LlmProvider = 'gemini' | 'deepseek';
+export type LlmProvider = 'gemini' | 'deepseek' | 'openrouter';
 
 const PROVIDER = (process.env.AI_PROVIDER || 'gemini').toLowerCase().trim() as LlmProvider;
-const VALID_PROVIDERS: LlmProvider[] = ['gemini', 'deepseek'];
+const VALID_PROVIDERS: LlmProvider[] = ['gemini', 'deepseek', 'openrouter'];
 
 export function getProvider(): LlmProvider {
     if (VALID_PROVIDERS.includes(PROVIDER)) return PROVIDER;
@@ -21,20 +21,27 @@ export function getProvider(): LlmProvider {
 
 const GEMINI_DEFAULT_MODEL = 'gemini-2.5-flash';
 const DEEPSEEK_DEFAULT_MODEL = 'deepseek-chat';
+const OPENROUTER_DEFAULT_MODEL = 'openrouter/free'; // бесплатный роутер моделей
 const VALID_GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
 const VALID_DEEPSEEK_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
 
 /**
- * Возвращает имя модели для запроса. Для gemini — только Gemini-модели, для deepseek — только DeepSeek.
+ * Возвращает имя модели для запроса.
  */
 export function getModelForRequest(override?: string): string {
     const provider = getProvider();
     const envModel = (process.env.AI_MODEL || '').trim();
-    const raw = override || envModel || (provider === 'deepseek' ? DEEPSEEK_DEFAULT_MODEL : GEMINI_DEFAULT_MODEL);
+    const defaultModel = provider === 'openrouter' ? OPENROUTER_DEFAULT_MODEL
+        : provider === 'deepseek' ? DEEPSEEK_DEFAULT_MODEL
+        : GEMINI_DEFAULT_MODEL;
+    const raw = override || envModel || defaultModel;
 
+    if (provider === 'openrouter') {
+        return raw || OPENROUTER_DEFAULT_MODEL;
+    }
     if (provider === 'deepseek') {
         if (VALID_DEEPSEEK_MODELS.includes(raw)) return raw;
-        if (raw && !raw.includes('gemini')) return raw; // разрешаем кастомные имена DeepSeek
+        if (raw && !raw.includes('gemini')) return raw;
         return DEEPSEEK_DEFAULT_MODEL;
     }
 
@@ -127,7 +134,41 @@ async function callGemini(modelName: string, systemInstruction: string, userProm
 }
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
+const OPENROUTER_API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const LLM_TIMEOUT_MS = 120000;
+
+async function callOpenRouter(modelName: string, systemInstruction: string, userPrompt: string): Promise<GenerateCompletionResult> {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+        throw new Error('OPENROUTER_API_KEY is not set when AI_PROVIDER=openrouter. Get your key at https://openrouter.ai/settings/keys');
+    }
+    const messages: Array<{ role: string; content: string }> = [];
+    if (systemInstruction) messages.push({ role: 'system', content: systemInstruction });
+    messages.push({ role: 'user', content: userPrompt });
+
+    const { data } = await axios.post(
+        OPENROUTER_API_URL,
+        {
+            model: modelName,
+            messages,
+            max_tokens: 8192,
+        },
+        {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+                'HTTP-Referer': process.env.OPENROUTER_APP_URL || 'https://github.com/ai-content-curator',
+            },
+            timeout: LLM_TIMEOUT_MS,
+        }
+    );
+
+    const content = data?.choices?.[0]?.message?.content;
+    if (content == null) {
+        throw new Error('OpenRouter API returned response without choices[0].message.content');
+    }
+    return { text: typeof content === 'string' ? content : String(content) };
+}
 
 async function callDeepSeek(modelName: string, systemInstruction: string, userPrompt: string): Promise<GenerateCompletionResult> {
     const apiKey = process.env.DEEPSEEK_API_KEY;
@@ -190,6 +231,9 @@ export async function generateCompletion(
     const modelName = getModelForRequest(options?.modelName);
 
     const doCall = (): Promise<GenerateCompletionResult> => {
+        if (provider === 'openrouter') {
+            return callOpenRouter(modelName, systemInstruction, userPrompt);
+        }
         if (provider === 'deepseek') {
             return callDeepSeek(modelName, systemInstruction, userPrompt);
         }
@@ -225,5 +269,8 @@ export function ensureProviderKey(): void {
     }
     if (provider === 'deepseek' && !process.env.DEEPSEEK_API_KEY) {
         throw new Error('DEEPSEEK_API_KEY is not set when AI_PROVIDER=deepseek. Get your key at https://platform.deepseek.com');
+    }
+    if (provider === 'openrouter' && !process.env.OPENROUTER_API_KEY) {
+        throw new Error('OPENROUTER_API_KEY is not set when AI_PROVIDER=openrouter. Get your key at https://openrouter.ai/settings/keys');
     }
 }
