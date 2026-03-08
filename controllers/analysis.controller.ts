@@ -17,6 +17,7 @@ import { runFullAnalysisPipeline } from '../services/analysis-pipeline.service';
 import { checkUserChannelsNow } from '../services/telegram-channel-monitor.service';
 import { addAnalysisJob } from '../services/analysis-queue.service';
 import { getChannelPosts } from '../services/telegram-channel.service';
+import { getProvider, getModelForRequest } from '../services/llm-provider';
 import UserInterest from '../models/UserInterest';
 import AnalysisStageStats from '../models/AnalysisStageStats';
 import QAHistory from '../models/QAHistory';
@@ -436,6 +437,7 @@ export const processSingleUrlAnalysis = async (
 
 /**
  * Получить статус асинхронной задачи анализа
+ * В ответ добавлены aiProvider и aiModel — какая ИИ используется на сервере.
  */
 export const getAnalysisStatus = async (req: Request, res: Response): Promise<Response> => {
     const { jobId } = req.params;
@@ -446,7 +448,11 @@ export const getAnalysisStatus = async (req: Request, res: Response): Promise<Re
     if (!job) {
         return res.status(404).json({ message: 'Job not found', status: 'not_found' });
     }
-    return res.json(job);
+    return res.json({
+        ...job,
+        aiProvider: getProvider(),
+        aiModel: getModelForRequest(),
+    });
 };
 
 export const runAnalysisInBackground = async (
@@ -1135,8 +1141,11 @@ export const runAnalysisInBackground = async (
         analysisJobs.set(jobId, { status: 'completed', results });
         console.log('✅ [Job ' + jobId + '] Analysis completed, results:', results.length);
     } catch (error: any) {
-        console.error('❌ [Job ' + jobId + '] Analysis failed:', error.message);
-        analysisJobs.set(jobId, { status: 'error', error: error.message || 'Analysis failed' });
+        console.error('❌ [Job ' + jobId + '] Analysis failed:', error?.message ?? String(error));
+        const safeMessage = (error && typeof error === 'object' && typeof (error as Error).message === 'string')
+            ? (error as Error).message
+            : 'Analysis failed';
+        analysisJobs.set(jobId, { status: 'error', error: safeMessage });
     }
 };
 

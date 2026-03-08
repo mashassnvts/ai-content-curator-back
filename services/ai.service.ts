@@ -658,21 +658,27 @@ ${feedbackContext}${ragContext}
         return parsedResponse;
         
     } catch (error: any) {
-        // Логируем полную информацию об ошибке для диагностики
-        console.error(`AI Service Error: ${error.message || error}`);
-        if (error.code) console.error(`Error code: ${error.code}`);
-        if (error.status) console.error(`Error status: ${error.status}`);
-        if (error.statusCode) console.error(`Error statusCode: ${error.statusCode}`);
-        if (error.response) console.error(`Error response:`, JSON.stringify(error.response, null, 2));
-        
-        // Извлекаем сообщение об ошибке из разных мест ответа
+        // Логируем без JSON.stringify(error.response) — у axios response содержит циклические ссылки
+        const errMsg = error?.message ?? String(error);
+        console.error(`AI Service Error: ${errMsg}`);
+        if (error?.code) console.error(`Error code: ${error.code}`);
+        if (error?.status) console.error(`Error status: ${error.status}`);
+        if (error?.response) {
+            console.error(`Error response status: ${error.response.status}`);
+            if (error.response.data != null && typeof error.response.data === 'object' && !('req' in error.response.data))
+                console.error('Error response data:', JSON.stringify(error.response.data, null, 2));
+            else if (typeof error.response.data === 'string')
+                console.error('Error response data:', error.response.data);
+        }
+
+        // Извлекаем сообщение об ошибке из разных мест ответа (без сериализации всего error — возможны циклические ссылки)
         const errorResponse = error.response || error.error || error;
         const errorMessage = String(
-            errorResponse?.error?.message || 
-            errorResponse?.message || 
-            error.message || 
-            error || 
-            JSON.stringify(error)
+            errorResponse?.error?.message ||
+            errorResponse?.data?.error?.message ||
+            errorResponse?.message ||
+            error?.message ||
+            errMsg
         );
         const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
         
