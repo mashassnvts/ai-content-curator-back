@@ -1,71 +1,9 @@
-import { GoogleGenAI } from '@google/genai';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
 import { traceGeneration } from '../observability/langfuse-helpers';
-
-const apiKey = process.env.GEMINI_API_KEY;
-
-if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set in environment variables. Get your free API key at https://aistudio.google.com/app/apikey');
-}
-
-// Новый SDK может использовать переменную окружения GEMINI_API_KEY автоматически
-// Или передать через опции (проверяем оба варианта)
-const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
+import { generateCompletion, getProvider, getModelForRequest } from './llm-provider';
 
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
-
-// Очередь запросов для предотвращения rate limiting
-// Ограничиваем количество одновременных запросов к Gemini API
-class RequestQueue {
-    private queue: Array<() => Promise<any>> = [];
-    private running = 0;
-    private maxConcurrent: number;
-    private delayBetweenRequests: number;
-
-    constructor(maxConcurrent = 3, delayBetweenRequests = 500) {
-        this.maxConcurrent = maxConcurrent;
-        this.delayBetweenRequests = delayBetweenRequests;
-    }
-
-    async add<T>(fn: () => Promise<T>): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.queue.push(async () => {
-                try {
-                    const result = await fn();
-                    resolve(result);
-                } catch (error) {
-                    reject(error);
-                }
-            });
-            this.process();
-        });
-    }
-
-    private async process() {
-        if (this.running >= this.maxConcurrent || this.queue.length === 0) {
-            return;
-        }
-
-        this.running++;
-        const task = this.queue.shift();
-        if (task) {
-            try {
-                await task();
-            } finally {
-                this.running--;
-                // Небольшая задержка между запросами для предотвращения rate limiting
-                await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
-                this.process();
-            }
-        } else {
-            this.running--;
-        }
-    }
-}
-
-// Создаем глобальную очередь для всех запросов к Gemini API
-const apiRequestQueue = new RequestQueue(3, 500); // Максимум 3 параллельных запроса, задержка 500мс между ними
 
 export interface UserFeedbackHistory {
     url: string;
@@ -90,154 +28,6 @@ export interface AnalysisResult {
 }
 
 const MAX_CONTENT_LENGTH = 500000; // Максимальная длина контента для анализа
-
-async function generateCompletionWithRetry(
-    modelName: string,
-    systemInstruction: string,
-    userPrompt: string,
-    retries = 3, // Уменьшено до 3 для более быстрой обработки
-    delay = 2000
-) {
-    let lastError: any;
-    for (let i = 0; i < retries; i++) {
-        try {
-            const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Request timed out.')), 120000)
-            );
-            
-            // Новый SDK использует ai.models.generateContent
-            // systemInstruction можно передать отдельно или включить в contents
-            const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${userPrompt}` : userPrompt;
-            
-            // Используем очередь для предотвращения rate limiting
-            const completionPromise = traceGeneration(
-                'gemini-generateContent',
-                modelName,
-                fullPrompt.slice(0, 5000),
-                () => apiRequestQueue.add(() =>
-                    genAI.models.generateContent({
-                        model: modelName,
-                        contents: fullPrompt,
-                    })
-                )
-            );
-            
-            const completion = await Promise.race([completionPromise, timeoutPromise]) as any;
-            return completion;
-        } catch (error: any) {
-            lastError = error;
-            // Извлекаем сообщение об ошибке из разных мест ответа
-            const errorResponse = error.response || error.error || error;
-            const errorMessage = String(
-                errorResponse?.error?.message || 
-                errorResponse?.message || 
-                error.message || 
-                error || 
-                JSON.stringify(error)
-            );
-            const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
-            
-            // Проверка на ошибку API ключа (400) - сразу выбрасываем, не retry
-            const isApiKeyError = errorMessage.includes('API Key not found') || 
-                                 errorMessage.includes('API_KEY_INVALID') ||
-                                 errorMessage.includes('API key') ||
-                                 (errorCode === 400 && (errorMessage.includes('API') || errorMessage.includes('key')));
-            
-            if (isApiKeyError) {
-                // Ошибка API ключа - не retry, сразу выбрасываем
-                throw error;
-            }
-            
-            // Retry на таймауты, 429 (rate limit), 503 (overloaded) - можно повторить с задержкой
-            // НЕ retry на QUOTA_EXCEEDED (дневной лимит исчерпан)
-            const isOverloaded = errorMessage.includes('overloaded') || 
-                                errorMessage.includes('UNAVAILABLE') ||
-                                errorCode === 503;
-            
-            const isRetryable = errorMessage.includes('429') || 
-                               errorMessage.includes('timed out') ||
-                               (errorMessage.includes('RESOURCE_EXHAUSTED') && !errorMessage.includes('QUOTA_EXCEEDED')) ||
-                               isOverloaded || // 503 (overloaded) - делаем retry с задержкой
-                               errorCode === 429 ||
-                               errorCode === 503;
-            
-            const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
-                                   errorMessage.includes('quota exceeded') ||
-                                   errorMessage.includes('daily quota') ||
-                                   errorMessage.includes('FreeTier') ||
-                                   (errorCode === 429 && errorMessage.includes('limit: 20'));
-            
-            if (isQuotaExceeded) {
-                // Дневной лимит исчерпан - не retry, сразу выбрасываем ошибку
-                console.warn(`❌ Quota exceeded detected. Stopping retries immediately.`);
-                throw error;
-            } else if (isRetryable) {
-                // Ограничиваем количество попыток для rate limit до 2 (вместо 5)
-                // Это ускорит обработку при временных проблемах
-                if (i >= 2) {
-                    console.warn(`⚠️ Max retries reached (${i + 1}). Stopping.`);
-                    throw error;
-                }
-                
-                // Пытаемся извлечь рекомендуемую задержку из ответа API
-                let retryDelayMs = delay;
-                
-                // Ищем retry delay в ответе API (формат: "Please retry in Xs" или retryDelay в секундах)
-                const retryDelayMatch = errorMessage.match(/retry in ([\d.]+)s/i) || 
-                                       errorMessage.match(/retryDelay["\s:]+([\d.]+)/i);
-                
-                if (retryDelayMatch) {
-                    const retryDelaySeconds = parseFloat(retryDelayMatch[1]);
-                    if (!isNaN(retryDelaySeconds) && retryDelaySeconds > 0) {
-                        retryDelayMs = Math.ceil(retryDelaySeconds * 1000);
-                        console.log(`📊 API suggested retry delay: ${retryDelaySeconds}s`);
-                    }
-                }
-                
-                // Также проверяем details в ответе для retryDelay
-                try {
-                    const errorDetails = errorResponse?.error?.details || errorResponse?.details || [];
-                    for (const detail of Array.isArray(errorDetails) ? errorDetails : [errorDetails]) {
-                        if (detail?.['@type']?.includes('RetryInfo') && detail.retryDelay) {
-                            // retryDelay может быть в формате "51s" или объект с секундами
-                            const delayStr = typeof detail.retryDelay === 'string' 
-                                ? detail.retryDelay.replace('s', '') 
-                                : detail.retryDelay;
-                            const delaySeconds = parseFloat(delayStr);
-                            if (!isNaN(delaySeconds) && delaySeconds > 0) {
-                                retryDelayMs = Math.ceil(delaySeconds * 1000);
-                                console.log(`📊 API retryDelay from details: ${delaySeconds}s`);
-                                break;
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Игнорируем ошибки парсинга
-                }
-                
-                // Для перегрузки (503) используем более длинные задержки, если API не указал свою
-                if (isOverloaded && retryDelayMs === delay) {
-                    retryDelayMs = delay * 2;
-                }
-                
-                // Минимальная задержка 1 секунда, максимальная 10 секунд (уменьшено с 60)
-                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 10000));
-                
-                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage.substring(0, 200)}). Retrying in ${retryDelayMs / 1000}s...`);
-                await new Promise(res => setTimeout(res, retryDelayMs));
-                
-                // Увеличиваем базовую задержку для следующей попытки (если API не указал свою)
-                if (retryDelayMs === delay) {
-                    delay *= isOverloaded ? 1.8 : 1.5;
-                }
-            } else {
-                throw error;
-            }
-        }
-    }
-    console.error(`All ${retries} attempts to contact the AI service failed.`);
-    throw lastError;
-}
 
 /**
  * Получает RAG контекст из похожих статей пользователя
@@ -535,29 +325,9 @@ ${feedbackContext}${ragContext}
    - Если контент релевантен ТЕКУЩИМ интересам, даже если был старый негативный feedback - ставь соответствующую оценку` : ''}`;
 
     
-    // ВАЖНО: gemini-3-pro-preview НЕ доступна в бесплатном тарифе (лимит = 0)
-    // Используем Gemini 1.5 Flash по умолчанию (быстрая, бесплатно, до 1M токенов в день)
-    // Или Gemini 1.5 Pro (лучшее качество, бесплатно, до 1M токенов в день)
-    let aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
-    
-    // Автоматическая замена неподдерживаемых моделей на Gemini
-    if (aiModel.includes('anthropic') || aiModel.includes('claude')) {
-        console.warn(`⚠️ Detected unsupported model "${aiModel}". Automatically switching to Gemini.`);
-        aiModel = 'gemini-2.5-flash';
-    }
-    
-    // ВАЖНО: gemini-3-pro-preview НЕ доступна в бесплатном тарифе - заменяем на gemini-2.5-flash
-    if (aiModel.includes('gemini-3-pro') || aiModel === 'gemini-3-pro-preview') {
-        console.warn(`⚠️ Model "${aiModel}" is not available in FREE tier (limit: 0). Switching to gemini-2.5-flash.`);
-        aiModel = 'gemini-2.5-flash';
-    }
-    
-    // Валидация: проверяем, что модель является Gemini
-    const validGeminiModels = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-    if (!validGeminiModels.includes(aiModel)) {
-        console.warn(`⚠️ Unknown model "${aiModel}". Using default: gemini-2.5-flash`);
-        aiModel = 'gemini-2.5-flash';
-    }
+    // Выбор модели через единый провайдер (Gemini или DeepSeek)
+    const provider = getProvider();
+    const aiModel = getModelForRequest();
 
     // Gemini требует JSON в промпте, а не через response_format
     const jsonPrompt = `${userPrompt}
@@ -571,7 +341,8 @@ ${feedbackContext}${ragContext}
 }`;
 
     try {
-        console.log(`🤖 Using AI model: ${aiModel} (Google Gemini - FREE)`);
+        const providerLabel = provider === 'deepseek' ? 'DeepSeek' : 'Google Gemini - FREE';
+        console.log(`🤖 Using AI model: ${aiModel} (${providerLabel})`);
         if (IS_DEBUG) {
             console.log(`📊 Content length: ${processedContent.length} chars (${Math.round(processedContent.length / 4)} estimated tokens)`);
             console.log(`📋 Selected interests: ${interests}`);
@@ -616,124 +387,20 @@ ${feedbackContext}${ragContext}
         }
         
         if (IS_DEBUG) {
-            console.log('Sending request to Gemini API...');
+            console.log('Sending request to AI API...');
         }
         
-        // Список моделей для fallback при ошибке 503 (модель перегружена) или 404 (модель не найдена)
-        // gemini-pro не поддерживается в API v1beta, поэтому используем только gemini-2.5-flash
-        // Если gemini-2.5-flash перегружен, просто ждем и повторяем запрос (retry уже есть в generateCompletionWithRetry)
-        // НЕ используем gemini-pro, так как он недоступен в v1beta API
-        const fallbackModels: string[] = []; // Пустой список - не переключаемся на другие модели
-        const currentModelIndex = fallbackModels.indexOf(aiModel);
-        const modelsToTry = currentModelIndex >= 0 
-            ? fallbackModels.slice(currentModelIndex) 
-            : [aiModel, ...fallbackModels];
-        
-        let result: any = null;
-        let lastError: any = null;
-        
-        for (const modelToTry of modelsToTry) {
-            try {
-                if (IS_DEBUG) {
-                    console.log(`🤖 Trying model: ${modelToTry}`);
-                }
-                result = await generateCompletionWithRetry(modelToTry, systemInstruction, jsonPrompt);
-                if (modelToTry !== aiModel) {
-                    console.log(`✓ Fallback to ${modelToTry} succeeded`);
-                }
-                break; // Успешно получили ответ
-            } catch (error: any) {
-                lastError = error;
-                // Извлекаем сообщение об ошибке из разных мест ответа
-                const errorResponse = error.response || error.error || error;
-                const errorMessage = String(
-                    errorResponse?.error?.message || 
-                    errorResponse?.message || 
-                    error.message || 
-                    error || 
-                    JSON.stringify(error)
-                );
-                const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
-                
-                // Проверка на ошибку API ключа (400) - сразу выбрасываем, не пробуем другие модели
-                const isApiKeyError = errorMessage.includes('API Key not found') || 
-                                     errorMessage.includes('API_KEY_INVALID') ||
-                                     errorMessage.includes('API key') ||
-                                     (errorCode === 400 && (errorMessage.includes('API') || errorMessage.includes('key')));
-                
-                if (isApiKeyError) {
-                    console.error(`❌ API Key error (400): ${errorMessage}`);
-                    throw error; // Сразу выбрасываем, не пробуем другие модели
-                }
-                
-                // Если это 503 (модель перегружена) или 404 (модель не найдена) - пробуем следующую модель
-                const isOverloaded = errorMessage.includes('503') || 
-                                    errorMessage.includes('overloaded') || 
-                                    errorMessage.includes('UNAVAILABLE') ||
-                                    errorCode === 503;
-                
-                const isModelNotFound = (errorMessage.includes('404') || 
-                                       errorMessage.includes('not found') || 
-                                       errorMessage.includes('NOT_FOUND') ||
-                                       errorCode === 404 ||
-                                       (errorMessage.includes('is not found') && errorMessage.includes('API version'))) &&
-                                       !isApiKeyError; // Не считаем ошибкой API ключа
-                
-                const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
-                                       errorMessage.includes('quota exceeded') ||
-                                       errorMessage.includes('daily quota');
-                
-                // Если квота исчерпана - не пробуем другие модели
-                if (isQuotaExceeded) {
-                    throw error;
-                }
-                
-                // Если модель не найдена (404) или перегружена (503) - пробуем следующую модель
-                if (isModelNotFound || isOverloaded) {
-                    // Если это последняя модель в списке - выбрасываем ошибку
-                    if (modelsToTry.indexOf(modelToTry) === modelsToTry.length - 1) {
-                        if (isModelNotFound) {
-                            console.error(`❌ Model ${modelToTry} is not found (404). All fallback models exhausted.`);
-                        } else {
-                            console.error(`❌ Model ${modelToTry} is overloaded (503). All fallback models exhausted.`);
-                        }
-                        throw error;
-                    }
-                    
-                    if (isModelNotFound) {
-                        console.log(`⚠️ Model ${modelToTry} is not found (404). Trying next fallback model...`);
-                    } else {
-                        console.log(`⚠️ Model ${modelToTry} is overloaded (503). Trying next fallback model...`);
-                    }
-                    continue; // Пробуем следующую модель
-                }
-                
-                // Для других ошибок - выбрасываем сразу
-                throw error;
-            }
-        }
-        
-        if (!result) {
-            throw lastError || new Error('All models failed');
-        }
-        
-        // Логируем структуру ответа для диагностики
-        if (process.env.LOG_LEVEL === 'debug') {
-            console.log('Gemini API response structure:', JSON.stringify(Object.keys(result || {}), null, 2));
-        }
-        
-        // Новый SDK может возвращать ответ в разных форматах
-        let rawResponse: string;
-        if (result.text) {
-            rawResponse = result.text;
-        } else if (result.response && result.response.text) {
-            rawResponse = result.response.text();
-        } else if (typeof result === 'string') {
-            rawResponse = result;
-        } else {
-            console.error('❌ AI response has unexpected structure:', JSON.stringify(result, null, 2));
-            throw new Error('AI service returned response in unexpected format.');
-        }
+        const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Request timed out.')), 120000)
+        );
+        const completionPromise = traceGeneration(
+            'gemini-generateContent',
+            aiModel,
+            (systemInstruction + '\n\n' + jsonPrompt).slice(0, 5000),
+            () => generateCompletion(systemInstruction, jsonPrompt, { modelName: aiModel })
+        );
+        const result = await Promise.race([completionPromise, timeoutPromise]) as { text: string };
+        const rawResponse = result.text;
 
         if (!rawResponse) {
             console.error('❌ AI response content is empty');
@@ -1018,38 +685,40 @@ ${feedbackContext}${ragContext}
         if (isApiKeyError) {
             console.error(`❌ API Key error: ${errorMessage}`);
             console.error('');
-            console.error('💡 This project uses Google Gemini API (FREE).');
+            const providerName = getProvider() === 'deepseek' ? 'DeepSeek' : 'Google Gemini';
+            console.error(`💡 This project uses ${providerName} API.`);
             console.error('   The API key is missing or invalid.');
             console.error('');
             console.error('📝 To fix this:');
-            console.error('   1. Get your FREE API key at: https://aistudio.google.com/app/apikey');
-            console.error('   2. Add to your .env file: GEMINI_API_KEY=your_key_here');
+            if (getProvider() === 'deepseek') {
+                console.error('   1. Get your API key at: https://platform.deepseek.com');
+                console.error('   2. Add to your .env file: DEEPSEEK_API_KEY=your_key_here');
+            } else {
+                console.error('   1. Get your FREE API key at: https://aistudio.google.com/app/apikey');
+                console.error('   2. Add to your .env file: GEMINI_API_KEY=your_key_here');
+            }
             console.error('   3. Make sure the API key is correct and not expired');
             console.error('   4. Restart your server');
-            throw new Error(`API ключ не найден или неверен. Получите API ключ на https://aistudio.google.com/app/apikey и добавьте его в .env файл как GEMINI_API_KEY=your_key_here`);
+            throw new Error(`API ключ не найден или неверен. ${getProvider() === 'deepseek' ? 'Добавьте DEEPSEEK_API_KEY в .env' : 'Получите API ключ на https://aistudio.google.com/app/apikey и добавьте GEMINI_API_KEY в .env'}`);
         }
         
-        // Обработка ошибки недоступной модели (404, 400 без ошибки API ключа)
         if (errorMessage.includes('404') || 
             (errorCode === 404) ||
             (errorCode === 400 && !isApiKeyError && (errorMessage.includes('not found') || errorMessage.includes('not a valid model') || errorMessage.includes('INVALID_ARGUMENT')))) {
+            const providerName = getProvider() === 'deepseek' ? 'DeepSeek' : 'Gemini';
             console.error(`❌ Model "${aiModel}" is not available or has invalid name!`);
             console.error('');
-            console.error('💡 This project uses Google Gemini API (FREE).');
-            console.error('   Available Gemini models (FREE tier):');
-            console.error('   - gemini-2.5-flash (fast, up to 1M tokens) ✅ RECOMMENDED');
-            console.error('   - gemini-1.5-pro (best quality, up to 1M tokens)');
-            console.error('   - gemini-pro (legacy, up to 32k tokens)');
-            console.error('');
-            console.error('   ⚠️ NOTE: gemini-3-pro-preview is NOT available in FREE tier (limit: 0)');
-            console.error('   Use gemini-2.5-flash or gemini-1.5-pro instead.');
-            console.error('');
-            console.error('📝 To fix this:');
-            console.error('   1. Get your FREE API key at: https://aistudio.google.com/app/apikey');
-            console.error('   2. Add to your .env file: GEMINI_API_KEY=your_key_here');
-            console.error('   3. Set AI_MODEL=gemini-2.5-flash (or gemini-1.5-pro)');
-            console.error('   4. Restart your server');
-            throw new Error(`Модель "${aiModel}" недоступна. Используйте gemini-2.5-flash или gemini-1.5-pro. Получите API ключ на https://aistudio.google.com/app/apikey`);
+            if (getProvider() === 'deepseek') {
+                console.error('   DeepSeek models: deepseek-chat, deepseek-reasoner');
+                console.error('   Set AI_MODEL=deepseek-chat (or deepseek-reasoner) and DEEPSEEK_API_KEY in .env');
+            } else {
+                console.error('   Available Gemini models (FREE tier):');
+                console.error('   - gemini-2.5-flash (fast, up to 1M tokens) ✅ RECOMMENDED');
+                console.error('   - gemini-1.5-pro (best quality, up to 1M tokens)');
+                console.error('   - gemini-pro (legacy, up to 32k tokens)');
+                console.error('   Set AI_MODEL=gemini-2.5-flash and GEMINI_API_KEY in .env');
+            }
+            throw new Error(`Модель "${aiModel}" недоступна. ${getProvider() === 'deepseek' ? 'Используйте deepseek-chat. Задайте DEEPSEEK_API_KEY в .env' : 'Используйте gemini-2.5-flash или gemini-1.5-pro. Задайте GEMINI_API_KEY в .env'}`);
         }
         
         // Обработка ошибки перегрузки модели (503) - модель временно недоступна
@@ -1199,24 +868,7 @@ ${truncatedContent}
 
 ОТВЕТ:`;
 
-    const result = await generateCompletionWithRetry('gemini-2.5-flash', systemInstruction, userPrompt);
-
-    let rawResponse: string = '';
-    if (result?.text) {
-        rawResponse = result.text;
-    } else if (result?.response?.text) {
-        rawResponse = typeof result.response.text === 'function' ? result.response.text() : String(result.response.text || '');
-    } else if (typeof result === 'string') {
-        rawResponse = result;
-    } else if (result?.candidates?.[0]?.content?.parts?.[0]?.text) {
-        rawResponse = result.candidates[0].content.parts[0].text;
-    } else if (result?.candidates?.[0]?.content?.parts?.[0]) {
-        const part = result.candidates[0].content.parts[0];
-        rawResponse = part.text ?? part.inlineData ?? '';
-    } else {
-        console.error('❌ [Q&A] AI response has unexpected structure:', result ? Object.keys(result) : 'null');
-        throw new Error('AI ответил в неожиданном формате');
-    }
-
-    return (String(rawResponse || '').trim()) || 'Не удалось получить ответ.';
+    const result = await generateCompletion(systemInstruction, userPrompt, { modelName: getModelForRequest() });
+    const rawResponse = (result?.text ?? '').trim();
+    return rawResponse || 'Не удалось получить ответ.';
 }

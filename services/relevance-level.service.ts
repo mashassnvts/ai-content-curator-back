@@ -1,65 +1,7 @@
-import { GoogleGenAI } from '@google/genai';
 import { traceGeneration } from '../observability/langfuse-helpers';
+import { generateCompletion, getModelForRequest } from './llm-provider';
 
-const apiKey = process.env.GEMINI_API_KEY;
-
-if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set in environment variables.');
-}
-
-const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
-
-// Очередь запросов для предотвращения rate limiting (используем ту же очередь, что и в ai.service.ts)
-// Импортируем очередь из ai.service.ts или создаем общую
-class RequestQueue {
-    private queue: Array<() => Promise<any>> = [];
-    private running = 0;
-    private maxConcurrent: number;
-    private delayBetweenRequests: number;
-
-    constructor(maxConcurrent = 3, delayBetweenRequests = 500) {
-        this.maxConcurrent = maxConcurrent;
-        this.delayBetweenRequests = delayBetweenRequests;
-    }
-
-    async add<T>(fn: () => Promise<T>): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.queue.push(async () => {
-                try {
-                    const result = await fn();
-                    resolve(result);
-                } catch (error) {
-                    reject(error);
-                }
-            });
-            this.process();
-        });
-    }
-
-    private async process() {
-        if (this.running >= this.maxConcurrent || this.queue.length === 0) {
-            return;
-        }
-
-        this.running++;
-        const task = this.queue.shift();
-        if (task) {
-            try {
-                await task();
-            } finally {
-                this.running--;
-                // Небольшая задержка между запросами для предотвращения rate limiting
-                await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
-                this.process();
-            }
-        } else {
-            this.running--;
-        }
-    }
-}
-
-// Создаем глобальную очередь для всех запросов к Gemini API
-const apiRequestQueue = new RequestQueue(3, 500); // Максимум 3 параллельных запроса, задержка 500мс между ними
+// Очередь не нужна — она внутри llm-provider
 
 export interface RelevanceLevelResult {
     contentLevel: 'novice' | 'amateur' | 'professional'; // Уровень профессиональности контента (новичок, любитель, профессионал)
@@ -76,127 +18,6 @@ export interface UserLevel {
 
 const MAX_CONTENT_LENGTH = 500000;
 
-async function generateCompletionWithRetry(
-    modelName: string,
-    systemInstruction: string,
-    userPrompt: string,
-    retries = 3,
-    delay = 2000
-) {
-    let lastError: any;
-    for (let i = 0; i < retries; i++) {
-        try {
-            const timeoutPromise = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Request timed out.')), 120000)
-            );
-            
-            const fullPrompt = systemInstruction ? `${systemInstruction}\n\n${userPrompt}` : userPrompt;
-            
-            const completionPromise = traceGeneration(
-                'relevance-level-analyze',
-                modelName,
-                fullPrompt.slice(0, 3000),
-                () => apiRequestQueue.add(() =>
-                    genAI.models.generateContent({
-                        model: modelName,
-                        contents: fullPrompt,
-                    })
-                )
-            );
-            
-            const completion = await Promise.race([completionPromise, timeoutPromise]) as any;
-            return completion;
-        } catch (error: any) {
-            lastError = error;
-            const errorResponse = error.response || error.error || error;
-            const errorMessage = String(
-                errorResponse?.error?.message || 
-                errorResponse?.message || 
-                error.message || 
-                error || 
-                JSON.stringify(error)
-            );
-            const errorCode = errorResponse?.error?.code || error.code || error.status || error.statusCode || '';
-            
-            const isRetryable = errorMessage.includes('503') || 
-                               errorMessage.includes('429') || 
-                               errorMessage.includes('timed out') ||
-                               (errorMessage.includes('RESOURCE_EXHAUSTED') && !errorMessage.includes('QUOTA_EXCEEDED')) ||
-                               errorCode === 503 ||
-                               errorCode === 429;
-            
-            const isQuotaExceeded = errorMessage.includes('QUOTA_EXCEEDED') || 
-                                   errorMessage.includes('quota exceeded') ||
-                                   errorMessage.includes('daily quota') ||
-                                   errorMessage.includes('FreeTier') ||
-                                   (errorCode === 429 && errorMessage.includes('limit: 20'));
-            
-            // Если квота превышена, сразу прекращаем попытки
-            if (isQuotaExceeded) {
-                console.warn(`❌ Quota exceeded detected. Stopping retries.`);
-                throw error;
-            } else if (isRetryable) {
-                // Пытаемся извлечь рекомендуемую задержку из ответа API
-                let retryDelayMs = delay;
-                
-                // Ищем retry delay в ответе API
-                const retryDelayMatch = errorMessage.match(/retry in ([\d.]+)s/i) || 
-                                       errorMessage.match(/retryDelay["\s:]+([\d.]+)/i);
-                
-                if (retryDelayMatch) {
-                    const retryDelaySeconds = parseFloat(retryDelayMatch[1]);
-                    if (!isNaN(retryDelaySeconds) && retryDelaySeconds > 0) {
-                        retryDelayMs = Math.ceil(retryDelaySeconds * 1000);
-                        console.log(`📊 API suggested retry delay: ${retryDelaySeconds}s`);
-                    }
-                }
-                
-                // Проверяем details в ответе для retryDelay
-                try {
-                    const errorDetails = errorResponse?.error?.details || errorResponse?.details || [];
-                    for (const detail of Array.isArray(errorDetails) ? errorDetails : [errorDetails]) {
-                        if (detail?.['@type']?.includes('RetryInfo') && detail.retryDelay) {
-                            const delayStr = typeof detail.retryDelay === 'string' 
-                                ? detail.retryDelay.replace('s', '') 
-                                : detail.retryDelay;
-                            const delaySeconds = parseFloat(delayStr);
-                            if (!isNaN(delaySeconds) && delaySeconds > 0) {
-                                retryDelayMs = Math.ceil(delaySeconds * 1000);
-                                console.log(`📊 API retryDelay from details: ${delaySeconds}s`);
-                                break;
-                            }
-                        }
-                    }
-                } catch (e) {
-                    // Игнорируем ошибки парсинга
-                }
-                
-                // Минимальная задержка 1 секунда, максимальная 60 секунд
-                retryDelayMs = Math.max(1000, Math.min(retryDelayMs, 60000));
-                
-                console.log(`Attempt ${i + 1} of ${retries} failed (${errorMessage.substring(0, 200)}). Retrying in ${retryDelayMs / 1000}s...`);
-                await new Promise(res => setTimeout(res, retryDelayMs));
-                
-                // Увеличиваем базовую задержку для следующей попытки (если API не указал свою)
-                if (retryDelayMs === delay) {
-                    delay *= 1.5;
-                }
-            } else {
-                throw error;
-            }
-        }
-    }
-    throw lastError;
-}
-
-/**
- * Анализирует уровень релевантности контента для конкретного интереса
- * 
- * @param content - Текст контента для анализа
- * @param interest - Конкретный интерес, для которого анализируется контент
- * @param userLevel - Уровень пользователя в этом интересе (опционально)
- * @returns Результат анализа уровня релевантности для данного интереса
- */
 export const analyzeRelevanceLevelForInterest = async (
     content: string,
     interest: string,
@@ -295,29 +116,20 @@ ${userLevelsDescription}
     "recommendations": "<рекомендации на русском языке (опционально)>"
 }`;
 
-    const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
+    const aiModel = getModelForRequest();
 
     try {
         console.log(`🔍 Analyzing relevance level using model: ${aiModel}`);
         console.log(`📊 Content length: ${processedContent.length} chars`);
         console.log(`👤 User level for interest "${interest}": ${userLevel || 'Not specified'}`);
 
-        const result = await generateCompletionWithRetry(aiModel, systemInstruction, jsonPrompt);
-
-        // Логируем структуру ответа для диагностики
-        console.log('Gemini API response structure:', JSON.stringify(Object.keys(result || {}), null, 2));
-
-        let rawResponse: string;
-        if (result.text) {
-            rawResponse = result.text;
-        } else if (result.response && result.response.text) {
-            rawResponse = result.response.text();
-        } else if (typeof result === 'string') {
-            rawResponse = result;
-        } else {
-            console.error('❌ AI response has unexpected structure:', JSON.stringify(result, null, 2));
-            throw new Error('AI service returned response in unexpected format.');
-        }
+        const result = await traceGeneration(
+            'relevance-level-analyze',
+            aiModel,
+            (systemInstruction + '\n\n' + jsonPrompt).slice(0, 3000),
+            () => generateCompletion(systemInstruction, jsonPrompt, { modelName: aiModel })
+        ) as { text: string };
+        const rawResponse = result.text;
 
         console.log('Raw AI response length:', rawResponse.length);
         console.log('Raw AI response (first 500 chars):', rawResponse.substring(0, 500));
@@ -533,25 +345,19 @@ ${processedContent}
     ]
 }`;
 
-    const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
+    const aiModel = getModelForRequest();
 
     try {
         console.log(`🔍 Analyzing relevance level for ${interestsWithLevels.length} interests in ONE request using model: ${aiModel}`);
         console.log(`📊 Content length: ${processedContent.length} chars`);
 
-        const result = await generateCompletionWithRetry(aiModel, systemInstruction, jsonPrompt);
-
-        let rawResponse: string;
-        if (result.text) {
-            rawResponse = result.text;
-        } else if (result.response && result.response.text) {
-            rawResponse = result.response.text();
-        } else if (typeof result === 'string') {
-            rawResponse = result;
-        } else {
-            console.error('❌ AI response has unexpected structure:', JSON.stringify(result, null, 2));
-            throw new Error('AI service returned response in unexpected format.');
-        }
+        const result = await traceGeneration(
+            'relevance-level-analyze',
+            aiModel,
+            (systemInstruction + '\n\n' + jsonPrompt).slice(0, 3000),
+            () => generateCompletion(systemInstruction, jsonPrompt, { modelName: aiModel })
+        ) as { text: string };
+        const rawResponse = result.text;
 
         // Очистка от markdown разметки
         let cleanedResponse = rawResponse.trim();

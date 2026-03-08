@@ -1,69 +1,12 @@
-import { GoogleGenAI } from '@google/genai';
 import UserSemanticTag from '../models/UserSemanticTag';
 import { traceGeneration } from '../observability/langfuse-helpers';
+import { generateCompletion, getModelForRequest } from './llm-provider';
 import { generateEmbedding, findSimilarArticles } from './embedding.service';
 import { recallForUser } from './hindsight.service';
 import { searchForUser } from './graphiti.service';
 
-const apiKey = process.env.GEMINI_API_KEY;
-
-if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set in environment variables. Get your free API key at https://aistudio.google.com/app/apikey');
-}
-
-const genAI = apiKey ? new GoogleGenAI({ apiKey }) : new GoogleGenAI({});
-
 const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 const IS_DEBUG = LOG_LEVEL === 'debug';
-
-// Очередь запросов для предотвращения rate limiting (используем ту же логику, что и в ai.service.ts)
-class RequestQueue {
-    private queue: Array<() => Promise<any>> = [];
-    private running = 0;
-    private maxConcurrent: number;
-    private delayBetweenRequests: number;
-
-    constructor(maxConcurrent = 3, delayBetweenRequests = 500) {
-        this.maxConcurrent = maxConcurrent;
-        this.delayBetweenRequests = delayBetweenRequests;
-    }
-
-    async add<T>(fn: () => Promise<T>): Promise<T> {
-        return new Promise((resolve, reject) => {
-            this.queue.push(async () => {
-                try {
-                    const result = await fn();
-                    resolve(result);
-                } catch (error) {
-                    reject(error);
-                }
-            });
-            this.process();
-        });
-    }
-
-    private async process() {
-        if (this.running >= this.maxConcurrent || this.queue.length === 0) {
-            return;
-        }
-
-        this.running++;
-        const task = this.queue.shift();
-        if (task) {
-            try {
-                await task();
-            } finally {
-                this.running--;
-                await new Promise(resolve => setTimeout(resolve, this.delayBetweenRequests));
-                this.process();
-            }
-        } else {
-            this.running--;
-        }
-    }
-}
-
-const apiRequestQueue = new RequestQueue(3, 500);
 
 // Кэш тегов пользователя (userId -> {tags, timestamp})
 interface UserTagsCache {
@@ -257,25 +200,7 @@ ${processedText}
 - ["машинное обучение", "нейронные сети", "глубокое обучение"] (не "machine learning", "neural networks")`;
 
     try {
-        // Используем ту же модель, что и в ai.service.ts
-        let aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
-        
-        // Автоматическая замена неподдерживаемых моделей
-        if (aiModel.includes('anthropic') || aiModel.includes('claude')) {
-            console.warn(`⚠️ Detected unsupported model "${aiModel}". Automatically switching to Gemini.`);
-            aiModel = 'gemini-2.5-flash';
-        }
-        
-        if (aiModel.includes('gemini-3-pro') || aiModel === 'gemini-3-pro-preview') {
-            console.warn(`⚠️ Model "${aiModel}" is not available in FREE tier. Switching to gemini-2.5-flash.`);
-            aiModel = 'gemini-2.5-flash';
-        }
-        
-        const validGeminiModels = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-        if (!validGeminiModels.includes(aiModel)) {
-            console.warn(`⚠️ Unknown model "${aiModel}". Using default: gemini-2.5-flash`);
-            aiModel = 'gemini-2.5-flash';
-        }
+        const aiModel = getModelForRequest();
 
         console.log(`🎯 Extracting themes using AI model: ${aiModel}`);
         console.log(`📊 Text length: ${processedText.length} chars`);
@@ -288,33 +213,11 @@ ${processedText}
             'semantic-extractThemes',
             aiModel,
             userPrompt.slice(0, 3000),
-            () => apiRequestQueue.add(() =>
-                genAI.models.generateContent({
-                    model: aiModel,
-                    contents: `${systemInstruction}\n\n${userPrompt}`,
-                })
-            )
+            () => generateCompletion(systemInstruction, userPrompt, { modelName: aiModel })
         );
         
-        const result = await Promise.race([completionPromise, timeoutPromise]) as any;
-
-        // Извлекаем текст ответа
-        let rawResponse: string;
-        if (result.text) {
-            rawResponse = result.text;
-        } else if (result.response && result.response.text) {
-            rawResponse = result.response.text();
-        } else if (typeof result === 'string') {
-            rawResponse = result;
-        } else {
-            console.error('❌ AI response has unexpected structure:', JSON.stringify(result, null, 2));
-            throw new Error('AI service returned response in unexpected format.');
-        }
-
-        if (!rawResponse) {
-            console.error('❌ AI response content is empty');
-            throw new Error('AI response is empty.');
-        }
+        const result = await Promise.race([completionPromise, timeoutPromise]) as { text: string };
+        const rawResponse = result.text;
 
         console.log('Raw AI response (first 500 chars):', rawResponse.substring(0, 500));
 
@@ -796,33 +699,16 @@ export async function analyzeCommentSentiment(comment: string): Promise<{ sentim
 
 Ответь ТОЛЬКО одним словом: "positive" (нравится), "negative" (не нравится) или "neutral" (нейтрально).`;
 
-        // Используем ту же модель, что и в других местах (или из env)
-        const aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
+        const aiModel = getModelForRequest();
         
         const result = await traceGeneration(
             'semantic-analyzeSentiment',
             aiModel,
             comment.slice(0, 500),
-            () => apiRequestQueue.add(() =>
-                genAI.models.generateContent({
-                    model: aiModel,
-                    contents: prompt,
-                })
-            )
-        ) as any;
+            () => generateCompletion('', prompt, { modelName: aiModel })
+        ) as { text: string };
 
-        // Извлекаем текст ответа (как в других местах кода)
-        let responseText = '';
-        if (result.text) {
-            responseText = result.text;
-        } else if (result.response && result.response.text) {
-            responseText = result.response.text();
-        } else if (typeof result === 'string') {
-            responseText = result;
-        } else {
-            responseText = 'neutral';
-        }
-        responseText = responseText.trim().toLowerCase();
+        let responseText = (result?.text ?? '').trim().toLowerCase();
         if (responseText.includes('positive') || responseText.includes('нравится')) {
             return { sentiment: 'positive', weightModifier: 1.5 }; // Увеличиваем вес
         } else if (responseText.includes('negative') || responseText.includes('не нравится')) {
@@ -1269,68 +1155,24 @@ ${topUserTags}
 
 Ответь ТОЛЬКО текстом рекомендации на русском языке, без markdown разметки, без кавычек, без префиксов типа "Рекомендация:".`;
 
-        // Используем ту же модель и очередь запросов, что и в extractThemes
-        let aiModel = process.env.AI_MODEL || 'gemini-2.5-flash';
-        
-        // Автоматическая замена неподдерживаемых моделей
-        if (aiModel.includes('anthropic') || aiModel.includes('claude')) {
-            aiModel = 'gemini-2.5-flash';
-        }
-        
-        if (aiModel.includes('gemini-3-pro') || aiModel === 'gemini-3-pro-preview') {
-            aiModel = 'gemini-2.5-flash';
-        }
-        
-        const validGeminiModels = ['gemini-2.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
-        if (!validGeminiModels.includes(aiModel)) {
-            aiModel = 'gemini-2.5-flash';
-        }
+        // Используем единый провайдер LLM
+        const aiModel = getModelForRequest();
 
         console.log(`🤖 [generateSemanticRecommendation] Generating recommendation using ${aiModel}`);
 
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Request timed out.')), 30000) // 30 секунд для рекомендации
+            setTimeout(() => reject(new Error('Request timed out.')), 30000)
         );
         
         const completionPromise = traceGeneration(
             'semantic-generateRecommendation',
             aiModel,
             userPrompt.slice(0, 2000),
-            () => apiRequestQueue.add(async () => {
-                try {
-                    const response = await genAI.models.generateContent({
-                        model: aiModel,
-                        contents: `${systemInstruction}\n\n${userPrompt}`,
-                    });
-                    return response;
-                } catch (apiError: any) {
-                    console.error(`❌ [generateSemanticRecommendation] API call failed: ${apiError.message}`);
-                    throw apiError;
-                }
-            })
+            () => generateCompletion(systemInstruction, userPrompt, { modelName: aiModel })
         );
         
-        const result = await Promise.race([completionPromise, timeoutPromise]) as any;
-
-        // Извлекаем текст ответа
-        let rawResponse: string;
-        if (result.text) {
-            rawResponse = result.text;
-        } else if (result.response && typeof result.response.text === 'function') {
-            rawResponse = await result.response.text();
-        } else if (result.response && result.response.text) {
-            rawResponse = result.response.text;
-        } else if (typeof result === 'string') {
-            rawResponse = result;
-        } else {
-            console.error('❌ [generateSemanticRecommendation] AI response has unexpected structure:', JSON.stringify(result, null, 2));
-            throw new Error('AI service returned response in unexpected format.');
-        }
-
-        if (!rawResponse) {
-            console.error('❌ [generateSemanticRecommendation] AI response content is empty');
-            throw new Error('AI response is empty.');
-        }
+        const result = await Promise.race([completionPromise, timeoutPromise]) as { text: string };
+        let rawResponse = result?.text ?? '';
 
         // Очистка от markdown разметки
         let cleanedResponse = rawResponse.trim();
