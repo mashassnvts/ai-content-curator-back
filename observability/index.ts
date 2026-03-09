@@ -1,7 +1,7 @@
 /**
- * Observability module: Langfuse, OpenLIT, MLflow.
- * Переключение через OBSERVABILITY_TOOL=langfuse|openlit|mlflow
- * Все три отправляют трейсы в Langfuse (mlflow — через OTel, без MLflow Tracking Server).
+ * Observability module: Langfuse, OpenLIT, MLflow, Phoenix.
+ * Переключение через OBSERVABILITY_TOOL=langfuse|openlit|mlflow|phoenix
+ * Langfuse/OpenLIT/MLflow → Langfuse. Phoenix → Arize Phoenix (self-hosted, бесплатно).
  */
 
 const tool = process.env.OBSERVABILITY_TOOL?.toLowerCase().trim();
@@ -10,7 +10,16 @@ const enabled = process.env.OBSERVABILITY_ENABLED === 'true' || process.env.OBSE
 console.log('[Observability] OBSERVABILITY_ENABLED=', process.env.OBSERVABILITY_ENABLED, 'OBSERVABILITY_TOOL=', process.env.OBSERVABILITY_TOOL ?? '(not set)');
 
 if (!enabled || !tool) {
-    console.log('[Observability] Disabled or missing tool. Set OBSERVABILITY_ENABLED=true and OBSERVABILITY_TOOL=langfuse, openlit or mlflow');
+    console.log('[Observability] Disabled or missing tool. Set OBSERVABILITY_ENABLED=true and OBSERVABILITY_TOOL=langfuse, openlit, mlflow or phoenix');
+} else if (tool === 'phoenix') {
+    try {
+        require('./phoenix');
+        const url = process.env.PHOENIX_COLLECTOR_ENDPOINT || process.env.PHOENIX_URL || 'http://localhost:6006';
+        console.log('[Observability] Phoenix enabled. Traces →', url, '| UI: http://localhost:6006');
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn('[Observability] Phoenix init failed:', msg, '— Run: npm install @arizeai/phoenix-otel');
+    }
 } else if (tool === 'langfuse') {
     try {
         require('./langfuse');
@@ -39,7 +48,7 @@ if (!enabled || !tool) {
         console.warn('[Observability] OBSERVABILITY_TOOL=mlflow requires LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY. Set them or use langfuse/openlit.');
     }
 } else {
-    console.warn(`[Observability] Unknown tool: ${tool}. Use 'langfuse', 'openlit' or 'mlflow'.`);
+    console.warn(`[Observability] Unknown tool: ${tool}. Use 'langfuse', 'openlit', 'mlflow' or 'phoenix'.`);
 }
 
 export { traceGeneration, traceSpan } from './langfuse-helpers';
