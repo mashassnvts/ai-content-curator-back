@@ -1,8 +1,9 @@
 /**
- * Хелперы для ручной инструментации Langfuse, OpenLIT и MLflow.
+ * Хелперы для ручной инструментации Langfuse, OpenLIT, MLflow и Phoenix.
  * - OBSERVABILITY_TOOL=langfuse: использует @langfuse/tracing (startActiveObservation).
- * - OBSERVABILITY_TOOL=openlit: создаёт OTel span'ы через @opentelemetry/api (их экспортирует OpenLIT в Langfuse).
- * - OBSERVABILITY_TOOL=mlflow: трейсы в Langfuse через OTel (как openlit). MLflow REST убран из-за таймаутов.
+ * - OBSERVABILITY_TOOL=openlit: OTel span'ы → OpenLIT → Langfuse.
+ * - OBSERVABILITY_TOOL=mlflow: OTel span'ы → Langfuse (MLflow REST убран).
+ * - OBSERVABILITY_TOOL=phoenix: OTel span'ы → Arize Phoenix (self-hosted, бесплатно).
  */
 let startActiveObservation: typeof import('@langfuse/tracing')['startActiveObservation'] | null = null;
 try {
@@ -42,6 +43,15 @@ const useMlflow = () =>
     otelTrace != null &&
     SpanKind != null;
 
+/** phoenix = Arize Phoenix (self-hosted, бесплатно). OTel → Phoenix. */
+const usePhoenix = () =>
+    process.env.OBSERVABILITY_ENABLED === 'true' &&
+    process.env.OBSERVABILITY_TOOL?.toLowerCase() === 'phoenix' &&
+    otelTrace != null &&
+    SpanKind != null;
+
+const useOtel = () => useOpenlit() || useMlflow() || usePhoenix();
+
 const TRACER_NAME = 'ai-content-curator';
 const TRACER_VERSION = '1.0';
 
@@ -77,7 +87,7 @@ export async function traceGeneration<T>(
         );
     }
 
-    if (useOpenlit() && otelTrace && SpanKind) {
+    if (useOtel() && otelTrace && SpanKind) {
         const tracer = otelTrace.getTracer(TRACER_NAME, TRACER_VERSION);
         const spanName = `${name} ${model}`.trim() || name;
         const isEmbedding = /embed|embedding/i.test(name);
@@ -114,43 +124,6 @@ export async function traceGeneration<T>(
         }
     }
 
-    if (useMlflow() && otelTrace && SpanKind) {
-        const tracer = otelTrace.getTracer(TRACER_NAME, TRACER_VERSION);
-        const spanName = `${name} ${model}`.trim() || name;
-        const isEmbedding = /embed|embedding/i.test(name);
-        const span = tracer.startSpan(spanName, {
-            kind: SpanKind.CLIENT,
-            attributes: {
-                'gen_ai.operation.name': isEmbedding ? 'embeddings' : 'generate_content',
-                'gen_ai.provider.name': 'gcp.gen_ai',
-                'gen_ai.request.model': model,
-                'gen_ai.output.type': 'text',
-                'gen_ai.input.messages': typeof input === 'string'
-                    ? truncateForAttribute(input)
-                    : truncateForAttribute(JSON.stringify(input)),
-            },
-        });
-        try {
-            const result = await fn();
-            const output =
-                typeof result === 'object' && result !== null
-                    ? JSON.stringify(result)
-                    : String(result);
-            span.setAttribute('gen_ai.output.messages', truncateForAttribute(output));
-            span.setStatus({ code: 1 });
-            return result;
-        } catch (err) {
-            span.setStatus({
-                code: 2,
-                message: err instanceof Error ? err.message : String(err),
-            });
-            span.setAttribute('error.type', err instanceof Error ? err.name : '_OTHER');
-            throw err;
-        } finally {
-            span.end();
-        }
-    }
-
     return fn();
 }
 
@@ -169,36 +142,7 @@ export async function traceSpan<T>(
         });
     }
 
-    if (useOpenlit() && otelTrace && SpanKind) {
-        const tracer = otelTrace.getTracer(TRACER_NAME, TRACER_VERSION);
-        const span = tracer.startSpan(name, {
-            kind: SpanKind.INTERNAL,
-            attributes: meta
-                ? Object.fromEntries(
-                    Object.entries(meta).map(([k, v]) => [
-                        k,
-                        typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v),
-                    ])
-                )
-                : undefined,
-        });
-        try {
-            const result = await fn();
-            span.setStatus({ code: 1 });
-            return result;
-        } catch (err) {
-            span.setStatus({
-                code: 2,
-                message: err instanceof Error ? err.message : String(err),
-            });
-            span.setAttribute('error.type', err instanceof Error ? err.name : '_OTHER');
-            throw err;
-        } finally {
-            span.end();
-        }
-    }
-
-    if (useMlflow() && otelTrace && SpanKind) {
+    if (useOtel() && otelTrace && SpanKind) {
         const tracer = otelTrace.getTracer(TRACER_NAME, TRACER_VERSION);
         const span = tracer.startSpan(name, {
             kind: SpanKind.INTERNAL,
