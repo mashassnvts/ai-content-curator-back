@@ -54,8 +54,15 @@ export interface GenerateCompletionOptions {
     modelName?: string;
 }
 
+export interface LlmUsage {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+}
+
 export interface GenerateCompletionResult {
     text: string;
+    usage?: LlmUsage;
 }
 
 // Очередь запросов (общая для обоих провайдеров)
@@ -130,7 +137,19 @@ async function callGemini(modelName: string, systemInstruction: string, userProm
         contents: fullPrompt,
     });
     const text = extractTextFromGeminiResponse(response);
-    return { text };
+    const usageMetadata =
+        (response as any)?.usageMetadata ??
+        (response as any)?.response?.usageMetadata ??
+        (response as any)?.response?.response?.usageMetadata;
+    const usage =
+        usageMetadata && typeof usageMetadata === 'object'
+            ? {
+                prompt_tokens: Number(usageMetadata.promptTokenCount ?? usageMetadata.prompt_token_count ?? usageMetadata.promptTokens ?? 0) || 0,
+                completion_tokens: Number(usageMetadata.candidatesTokenCount ?? usageMetadata.completion_token_count ?? usageMetadata.completionTokens ?? 0) || 0,
+                total_tokens: Number(usageMetadata.totalTokenCount ?? usageMetadata.total_token_count ?? usageMetadata.totalTokens ?? 0) || 0,
+            }
+            : undefined;
+    return { text, usage };
 }
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -167,7 +186,15 @@ async function callOpenRouter(modelName: string, systemInstruction: string, user
     if (content == null) {
         throw new Error('OpenRouter API returned response without choices[0].message.content');
     }
-    return { text: typeof content === 'string' ? content : String(content) };
+    const usage =
+        data?.usage && typeof data.usage === 'object'
+            ? {
+                prompt_tokens: Number(data.usage.prompt_tokens ?? data.usage.promptTokens ?? data.usage.input_tokens ?? data.usage.inputTokens ?? 0) || 0,
+                completion_tokens: Number(data.usage.completion_tokens ?? data.usage.completionTokens ?? data.usage.output_tokens ?? data.usage.outputTokens ?? 0) || 0,
+                total_tokens: Number(data.usage.total_tokens ?? data.usage.totalTokens ?? 0) || 0,
+            }
+            : undefined;
+    return { text: typeof content === 'string' ? content : String(content), usage };
 }
 
 async function callDeepSeek(modelName: string, systemInstruction: string, userPrompt: string): Promise<GenerateCompletionResult> {
@@ -199,7 +226,15 @@ async function callDeepSeek(modelName: string, systemInstruction: string, userPr
     if (content == null) {
         throw new Error('DeepSeek API returned response without choices[0].message.content');
     }
-    return { text: typeof content === 'string' ? content : String(content) };
+    const usage =
+        data?.usage && typeof data.usage === 'object'
+            ? {
+                prompt_tokens: Number(data.usage.prompt_tokens ?? data.usage.promptTokens ?? data.usage.input_tokens ?? data.usage.inputTokens ?? 0) || 0,
+                completion_tokens: Number(data.usage.completion_tokens ?? data.usage.completionTokens ?? data.usage.output_tokens ?? data.usage.outputTokens ?? 0) || 0,
+                total_tokens: Number(data.usage.total_tokens ?? data.usage.totalTokens ?? 0) || 0,
+            }
+            : undefined;
+    return { text: typeof content === 'string' ? content : String(content), usage };
 }
 
 const MAX_RETRIES = 3;
