@@ -77,10 +77,29 @@ export async function traceGeneration<T>(
                     input: typeof input === 'string' ? input : JSON.stringify(input),
                 });
                 const result = await fn();
-                const output = typeof result === 'object' && result !== null
-                    ? JSON.stringify(result).slice(0, 10000)
-                    : String(result);
-                gen.update({ output });
+                const maybeText =
+                    typeof result === 'object' && result !== null && 'text' in (result as any)
+                        ? String((result as any).text ?? '')
+                        : null;
+                const output = maybeText != null && maybeText.length
+                    ? maybeText.slice(0, 10000)
+                    : (typeof result === 'object' && result !== null
+                        ? JSON.stringify(result).slice(0, 10000)
+                        : String(result));
+
+                const usage = (result as any)?.usage;
+                if (usage && typeof usage === 'object') {
+                    gen.update({
+                        output,
+                        usage: {
+                            prompt_tokens: Number(usage.prompt_tokens ?? usage.promptTokens ?? usage.input ?? 0) || 0,
+                            completion_tokens: Number(usage.completion_tokens ?? usage.completionTokens ?? usage.output ?? 0) || 0,
+                            total_tokens: Number(usage.total_tokens ?? usage.totalTokens ?? usage.total ?? 0) || 0,
+                        },
+                    } as any);
+                } else {
+                    gen.update({ output });
+                }
                 return result;
             },
             { asType: 'generation' }
@@ -110,6 +129,15 @@ export async function traceGeneration<T>(
                     ? JSON.stringify(result)
                     : String(result);
             span.setAttribute('gen_ai.output.messages', truncateForAttribute(output));
+            const usage = (result as any)?.usage;
+            if (usage && typeof usage === 'object') {
+                const promptTokens = Number(usage.prompt_tokens ?? usage.promptTokens ?? usage.input ?? 0) || 0;
+                const completionTokens = Number(usage.completion_tokens ?? usage.completionTokens ?? usage.output ?? 0) || 0;
+                const totalTokens = Number(usage.total_tokens ?? usage.totalTokens ?? usage.total ?? 0) || 0;
+                span.setAttribute('gen_ai.usage.prompt_tokens', promptTokens);
+                span.setAttribute('gen_ai.usage.completion_tokens', completionTokens);
+                span.setAttribute('gen_ai.usage.total_tokens', totalTokens);
+            }
             span.setStatus({ code: 1 }); // OK
             return result;
         } catch (err) {
